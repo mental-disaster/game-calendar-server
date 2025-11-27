@@ -1,7 +1,6 @@
 package com.projectgc.calendar.service
 
 import com.projectgc.calendar.model.GameReleaseSummary
-import com.projectgc.calendar.persistence.GameReleaseRepository
 import java.time.LocalDate
 import org.springframework.stereotype.Service
 
@@ -10,7 +9,6 @@ import org.springframework.stereotype.Service
  */
 @Service
 class GameReleaseService(
-    private val gameReleaseRepository: GameReleaseRepository
 ) {
     fun findUpcomingReleases(referenceDate: LocalDate = LocalDate.now()): List<GameReleaseSummary> {
         // TODO: Load releases after the reference date and map them to summaries.

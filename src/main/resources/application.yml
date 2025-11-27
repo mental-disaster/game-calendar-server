@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: projectgc
+
+  datasource:
+    url: jdbc:postgresql://localhost:5678/postgres
+    username: master
+    password: rudgns321
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+  sql:
+    init:
+      mode: never
