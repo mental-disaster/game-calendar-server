@@ -1,20 +1,24 @@
 package com.projectgc.batch.job
 
 import com.projectgc.batch.service.GameReleaseBatchService
+import org.slf4j.LoggerFactory
+import org.springframework.core.task.TaskRejectedException
+import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 
-/**
- * 배치 스케줄에 따라 게임 출시 정보를 갱신하는 잡의 엔트리 포인트입니다.
- */
 @Component
 class GameReleaseSyncJob(
-    private val gameReleaseBatchService: GameReleaseBatchService
+    private val gameReleaseBatchService: GameReleaseBatchService,
 ) {
-    fun runNightlySync() {
-        // TODO 스케줄러에서 호출하도록 구성하고 배치 서비스 동작을 연결합니다.
-    }
+    private val log = LoggerFactory.getLogger(javaClass)
 
-    fun runManualSync() {
-        // TODO 운영자가 수동 실행할 때 사용할 엔드포인트를 연동합니다.
+    @Scheduled(cron = "\${batch.sync.cron}")
+    fun runNightlySync() {
+        try {
+            log.info("야간 IGDB 동기화 잡 시작")
+            gameReleaseBatchService.syncAll()
+        } catch (e: TaskRejectedException) {
+            log.warn("야간 동기화 스킵 — 이전 실행이 아직 진행 중입니다.")
+        }
     }
 }

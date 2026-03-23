@@ -14,3 +14,28 @@ spring:
   sql:
     init:
       mode: never
+
+igdb:
+  client-id: {YOUR_IGDB_CLIENT_ID}      # Twitch Developer Console에서 발급
+  client-secret: {YOUR_IGDB_CLIENT_SECRET}
+  auth-url: https://id.twitch.tv/oauth2/token
+  base-url: https://api.igdb.com/v4
+  filter:
+    # 수집 대상 game_type (IGDB game_type ID 기준)
+    # 0=Main Game, 1=DLC/Addon, 2=Expansion, 4=Standalone Expansion,
+    # 6=Episode (예: Half-Life 2: Episode One), 7=Season (예: 라이브 게임 시즌),
+    # 8=Remake, 9=Remaster
+    # 제외: 3=Bundle, 5=Mod, 10=Expanded Game, 11=Port, 12=Fork, 13=Pack, 14=Update
+    game-types: [0, 1, 2, 4, 6, 7, 8, 9]
+    # 수집 기준 최초 출시일 하한 (Unix timestamp)
+    # 1735689600 = 2025-01-01 00:00:00 UTC
+    # first_release_date 가 null 인 TBA 타이틀은 수집 대상에서 제외
+    min-first-release-date: 1735689600
+    # 수집 대상 플랫폼 ID 목록 (비어 있으면 전체 플랫폼)
+    # 6=PC(Windows), 14=macOS, 34=Android, 39=iOS,
+    # 48=PS4, 130=Nintendo Switch, 167=PS5, 169=Xbox Series X|S, 508=Nintendo Switch 2
+    platform-ids: [6, 14, 34, 39, 48, 130, 167, 169, 508]
+
+batch:
+  sync:
+    cron: "0 0 3 * * TUE"  # 매주 화요일 새벽 3시

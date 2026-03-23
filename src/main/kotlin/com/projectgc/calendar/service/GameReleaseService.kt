@@ -11,12 +11,12 @@ import org.springframework.stereotype.Service
 class GameReleaseService(
 ) {
     fun findUpcomingReleases(referenceDate: LocalDate = LocalDate.now()): List<GameReleaseSummary> {
-        // TODO: Load releases after the reference date and map them to summaries.
-        throw NotImplementedError("Upcoming release retrieval is not implemented yet.")
+        // TODO: service 스키마 구현 후 연결
+        return emptyList()
     }
 
     fun findRecentReleases(referenceDate: LocalDate = LocalDate.now()): List<GameReleaseSummary> {
-        // TODO: Load releases before the reference date and map them to summaries.
-        throw NotImplementedError("Recent release retrieval is not implemented yet.")
+        // TODO: service 스키마 구현 후 연결
+        return emptyList()
     }
 }
