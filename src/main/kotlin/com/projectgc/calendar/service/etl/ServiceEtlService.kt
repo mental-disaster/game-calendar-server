@@ -2,6 +2,7 @@ package com.projectgc.calendar.service.etl
 
 import com.projectgc.calendar.repository.etl.ServiceEtlJdbcRepository
 import com.projectgc.calendar.repository.etl.ServiceEtlSourceLogEntry
+import com.projectgc.calendar.repository.etl.ServiceEtlTableSyncResult
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionTemplate
@@ -19,26 +20,10 @@ class ServiceEtlService(
         private const val COMPLETED = "completed"
         private const val FAILED = "failed"
         private const val SKIPPED = "skipped"
-        private const val SLICE1_NOTE = "slice1 skeleton: projection materialization is not implemented yet"
+        private const val SLICE2_PENDING_NOTE =
+            "slice2 pending: game-dependent projection materialization is not implemented yet"
 
-        private val SOURCE_TABLES = listOf(
-            "game_status",
-            "game_type",
-            "language",
-            "region",
-            "release_date_region",
-            "release_date_status",
-            "genre",
-            "theme",
-            "player_perspective",
-            "game_mode",
-            "keyword",
-            "language_support_type",
-            "website_type",
-            "platform_logo",
-            "platform_type",
-            "platform",
-            "company",
+        private val DEFERRED_SOURCE_TABLES = listOf(
             "game",
             "release_date",
             "involved_company",
@@ -53,6 +38,26 @@ class ServiceEtlService(
         )
     }
 
+    private val slice2SourceTables = listOf(
+        NonCursorSourceTable("game_status", serviceEtlJdbcRepository::syncGameStatuses),
+        NonCursorSourceTable("game_type", serviceEtlJdbcRepository::syncGameTypes),
+        NonCursorSourceTable("language", serviceEtlJdbcRepository::syncLanguages),
+        NonCursorSourceTable("region", serviceEtlJdbcRepository::syncRegions),
+        NonCursorSourceTable("release_date_region", serviceEtlJdbcRepository::syncReleaseRegions),
+        NonCursorSourceTable("release_date_status", serviceEtlJdbcRepository::syncReleaseStatuses),
+        NonCursorSourceTable("genre", serviceEtlJdbcRepository::syncGenres),
+        NonCursorSourceTable("theme", serviceEtlJdbcRepository::syncThemes),
+        NonCursorSourceTable("player_perspective", serviceEtlJdbcRepository::syncPlayerPerspectives),
+        NonCursorSourceTable("game_mode", serviceEtlJdbcRepository::syncGameModes),
+        NonCursorSourceTable("keyword", serviceEtlJdbcRepository::syncKeywords),
+        NonCursorSourceTable("language_support_type", serviceEtlJdbcRepository::syncLanguageSupportTypes),
+        NonCursorSourceTable("website_type", serviceEtlJdbcRepository::syncWebsiteTypes),
+        NonCursorSourceTable("platform_logo", serviceEtlJdbcRepository::syncPlatformLogos),
+        NonCursorSourceTable("platform_type", serviceEtlJdbcRepository::syncPlatformTypes),
+        NonCursorSourceTable("platform", serviceEtlJdbcRepository::syncPlatforms),
+        NonCursorSourceTable("company", serviceEtlJdbcRepository::syncCompanies),
+    )
+
     override fun run(runId: UUID, trigger: ServiceEtlTrigger) {
         val startedAt = Instant.now()
         log.info("service ETL 시작 (runId=$runId, trigger=${trigger.type}, ingestSyncId=${trigger.ingestSyncId})")
@@ -60,23 +65,8 @@ class ServiceEtlService(
 
         try {
             transactionTemplate.executeWithoutResult {
-                SOURCE_TABLES.forEach { tableName ->
-                    val cursor = serviceEtlJdbcRepository.findCursor(tableName)
-                    val loggedAt = Instant.now()
-                    serviceEtlJdbcRepository.insertSourceLog(
-                        ServiceEtlSourceLogEntry(
-                            runId = runId,
-                            tableName = tableName,
-                            status = SKIPPED,
-                            processedRows = 0,
-                            cursorFrom = cursor,
-                            cursorTo = cursor,
-                            note = SLICE1_NOTE,
-                            startedAt = loggedAt,
-                            finishedAt = loggedAt,
-                        )
-                    )
-                }
+                slice2SourceTables.forEach { sourceTable -> syncSourceTable(runId, sourceTable) }
+                DEFERRED_SOURCE_TABLES.forEach { tableName -> logSkippedSource(runId, tableName) }
             }
 
             serviceEtlJdbcRepository.finishRunLog(
@@ -100,4 +90,71 @@ class ServiceEtlService(
             throw ex
         }
     }
+
+    private fun syncSourceTable(runId: UUID, sourceTable: SourceTableDefinition) {
+        val tableStartedAt = Instant.now()
+        val cursorFrom = if (sourceTable.usesCursor) {
+            serviceEtlJdbcRepository.findCursor(sourceTable.tableName)
+        } else {
+            null
+        }
+        val result = sourceTable.sync(cursorFrom)
+        val tableFinishedAt = Instant.now()
+
+        if (sourceTable.usesCursor && result.nextCursor != null && result.nextCursor != cursorFrom) {
+            serviceEtlJdbcRepository.upsertCursor(
+                tableName = sourceTable.tableName,
+                lastSyncedAt = result.nextCursor,
+                syncedAt = tableFinishedAt,
+            )
+        }
+
+        serviceEtlJdbcRepository.insertSourceLog(
+            ServiceEtlSourceLogEntry(
+                runId = runId,
+                tableName = sourceTable.tableName,
+                status = COMPLETED,
+                processedRows = result.processedRows,
+                cursorFrom = cursorFrom,
+                cursorTo = if (sourceTable.usesCursor) result.nextCursor ?: cursorFrom else null,
+                note = result.note,
+                startedAt = tableStartedAt,
+                finishedAt = tableFinishedAt,
+            )
+        )
+    }
+
+    private fun logSkippedSource(runId: UUID, tableName: String) {
+        val loggedAt = Instant.now()
+        val cursor = serviceEtlJdbcRepository.findCursor(tableName)
+        serviceEtlJdbcRepository.insertSourceLog(
+            ServiceEtlSourceLogEntry(
+                runId = runId,
+                tableName = tableName,
+                status = SKIPPED,
+                processedRows = 0,
+                cursorFrom = cursor,
+                cursorTo = cursor,
+                note = SLICE2_PENDING_NOTE,
+                startedAt = loggedAt,
+                finishedAt = loggedAt,
+            )
+        )
+    }
+}
+
+private sealed interface SourceTableDefinition {
+    val tableName: String
+    val usesCursor: Boolean
+
+    fun sync(cursor: Long?): ServiceEtlTableSyncResult
+}
+
+private data class NonCursorSourceTable(
+    override val tableName: String,
+    private val syncer: () -> ServiceEtlTableSyncResult,
+) : SourceTableDefinition {
+    override val usesCursor: Boolean = false
+
+    override fun sync(cursor: Long?): ServiceEtlTableSyncResult = syncer()
 }

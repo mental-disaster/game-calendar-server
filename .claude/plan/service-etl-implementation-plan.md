@@ -11,8 +11,16 @@
 ## 1.1 현재 진행 상태
 
 - Slice 1은 승인 완료 상태다.
-- 다음 작업 시작점은 Slice 2 차원 테이블 증분 ETL이다.
+- Slice 2 차원 테이블 증분 ETL은 승인 보류 상태다.
+- 다음 작업 시작점은 Slice 2 blocking issue 해소 및 재검증이다.
 - Slice 1 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
+- Slice 2는 아래 blocking issue 해소 전까지 다음 Slice로 진행하지 않는다.
+
+### Slice 2 재검증 포인트
+
+- `company` 자기참조 FK가 참조 대상 부재 시 실패하지 않는지 확인
+- snapshot/페이지네이션 기반 source table에서 `updated_at` 전용 cursor 전략이 신규 row를 누락시키지 않는지 확인
+- 위 경계를 고정하는 테스트 존재 여부 확인
 
 ## 2. 확정 제약사항
 

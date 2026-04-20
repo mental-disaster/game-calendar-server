@@ -125,6 +125,37 @@
 
 ## Slice 2. 차원 테이블 증분 ETL
 
+### 현재 상태
+
+승인 보류. 재검증 필요.
+
+정리:
+
+- `calendar`가 `batch` 코드에 의존하지 않고 `ingest` 스키마를 직접 읽는 구조가 유지되었다.
+- 17개 차원 테이블의 증분 ETL이 연결되었다.
+- source table 특성에 따라 커서 기반 전략과 diff 기반 전략이 분리되었다.
+- `platform_logo`는 diff 기반 병합으로 처리된다.
+- Slice 2 관련 테스트가 실제 JDK 21 환경에서 통과했다는 리뷰가 있다.
+
+보류 사유:
+
+- 리뷰어 2명이 각각 `NON-PASS`를 부여한 blocking issue가 있었고, 그 이슈가 최신 코드에서 실제로 해소됐는지 계획 수준에서 독립 검증하지 못했다.
+- 특히 아래 2개는 해소 확인 전까지 Slice 2를 승인 상태로 두면 안 된다.
+  - `company` 자기참조 FK가 참조 대상 부재 시 런타임 실패를 유발하는지
+  - `updated_at` 전용 cursor 전략이 snapshot/paginated source table에서 late-arriving row를 영구 누락시키는지
+
+### 후속 메모
+
+- 초기 동기화 시 차원 테이블 전체를 한 번에 메모리로 읽는 방식은 현재 규모에선 허용되지만, 데이터가 커지면 chunk/streaming 방식으로 바꾸는 것을 검토한다.
+- 차원 테이블 null 허용 마이그레이션의 장기 계약은 후속 consumer 관점에서 다시 점검할 수 있다.
+
+### 재검증 필수 항목
+
+- `syncCompanies`가 `service.company`에 아직 없는 parent/merged target을 FK 위반 없이 처리하는지 확인
+- snapshot/전체 페이지네이션 기반 source table들이 `updated_at` nullable/old value 환경에서도 신규 row를 영구 누락하지 않는지 확인
+- 위 2개 경계를 고정하는 테스트 존재 여부 확인
+- 해결 확인 전까지 Slice 3로 넘어가지 않음
+
 ### 목표
 
 1:1 성격이 강한 차원 테이블의 delta 반영을 먼저 완성한다.
@@ -161,11 +192,16 @@
 - `ingest -> service` 컬럼 매핑 정확성
 - upsert SQL의 idempotency
 - 커서 전진 기준
+- source table별 증분 전략 선택이 원천 적재 방식과 맞는지
+- `company` 자기참조 FK 반영이 안전한지
 
 ### 승인 기준
 
 - 차원 테이블 create/update가 delta 기준으로 반영된다.
 - 재실행 시 중복 없이 같은 상태를 유지한다.
+- source table별 전략이 원천 ingest 적재 방식과 충돌하지 않는다.
+- `company` 자기참조 FK가 런타임 실패 없이 반영된다.
+- `updated_at`이 null이거나 cursor보다 오래된 late-arriving row도 영구 누락 없이 반영된다.
 
 ## Slice 3. affected `game_id` 계산기
 
