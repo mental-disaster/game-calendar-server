@@ -20,8 +20,10 @@ class ServiceEtlService(
     companion object {
         private const val COMPLETED = "completed"
         private const val FAILED = "failed"
-        private const val SLICE3_DRY_RUN_NOTE =
-            "dry-run: slice3 cursor is not advanced until projection materialization or durable affected-game handoff exists"
+        private const val SLICE4_CORE_PROJECTION_NOTE =
+            "slice4 core projection rebuilt: service.game, service.game_release, service.game_localization"
+        private const val SLICE4_DEFERRED_SOURCE_NOTE =
+            "slice4 deferred source dry-run: cursor remains deferred until slice5/6 projection materialization"
     }
 
     private val slice2SourceTables = listOf(
@@ -53,7 +55,7 @@ class ServiceEtlService(
             var affectedGameCount = 0
             transactionTemplate.executeWithoutResult {
                 slice2SourceTables.forEach { sourceTable -> syncSourceTable(runId, sourceTable) }
-                affectedGameCount = recordAffectedGameIdsDryRun(runId, startedAt.epochSecond)
+                affectedGameCount = rebuildAffectedGameProjections(runId, startedAt.epochSecond)
             }
 
             serviceEtlJdbcRepository.finishRunLog(
@@ -111,10 +113,23 @@ class ServiceEtlService(
         )
     }
 
-    private fun recordAffectedGameIdsDryRun(runId: UUID, syncStartedAt: Long): Int {
+    private fun rebuildAffectedGameProjections(runId: UUID, syncStartedAt: Long): Int {
         val calculationResult = affectedGameIdCalculator.calculate(syncStartedAt)
+        serviceEtlJdbcRepository.rebuildCoreGameProjections(calculationResult.affectedGameIds)
         calculationResult.sourceResults.forEach { sourceResult ->
             val loggedAt = Instant.now()
+            if (sourceResult.advanceCursor && sourceResult.cursorTo != null && sourceResult.cursorTo != sourceResult.cursorFrom) {
+                serviceEtlJdbcRepository.upsertCursor(
+                    tableName = sourceResult.tableName,
+                    lastSyncedAt = sourceResult.cursorTo,
+                    syncedAt = loggedAt,
+                )
+            }
+            val sliceNote = if (sourceResult.materializedInCurrentSlice) {
+                SLICE4_CORE_PROJECTION_NOTE
+            } else {
+                SLICE4_DEFERRED_SOURCE_NOTE
+            }
             serviceEtlJdbcRepository.insertSourceLog(
                 ServiceEtlSourceLogEntry(
                     runId = runId,
@@ -123,7 +138,7 @@ class ServiceEtlService(
                     processedRows = sourceResult.affectedGameIds.size,
                     cursorFrom = sourceResult.cursorFrom,
                     cursorTo = sourceResult.cursorTo,
-                    note = "${sourceResult.note}; $SLICE3_DRY_RUN_NOTE",
+                    note = "${sourceResult.note}; $sliceNote",
                     startedAt = loggedAt,
                     finishedAt = loggedAt,
                 )

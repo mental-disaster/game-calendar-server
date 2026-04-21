@@ -1,0 +1,3 @@
+ALTER TABLE service.game ALTER COLUMN slug DROP NOT NULL;
+ALTER TABLE service.game ALTER COLUMN name DROP NOT NULL;
+ALTER TABLE service.game_localization ALTER COLUMN name DROP NOT NULL;

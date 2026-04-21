@@ -211,7 +211,7 @@
 - 초기 전체 sweep 시 모든 game id를 메모리에 Set으로 적재하는 방식은 현 규모에서 허용 가능하더라도, 이후 Slice 4~6에서 chunk 처리 전략이 필요할 수 있다.
 - Slice 3 계산 자체의 JDBC 동작은 향후 repository 통합 테스트로 더 강하게 고정할 수 있다.
 - 이전 실험 버전이나 수동 조작으로 이미 Slice 3 cursor가 전진한 환경이 있다면, 운영 절차로 초기화/무시 기준을 확인하는 것이 안전하다.
-- Slice 4에서 실제 projection materialization이 들어오면 dry-run note와 cursor 정책을 함께 해제해야 한다.
+- Slice 4가 도입된 이후에는 core projection이 실제로 materialize된 뒤에만 관련 cursor가 전진해야 한다.
 
 ### 목표
 
@@ -255,6 +255,29 @@
 
 ## Slice 4. 핵심 game projection 재구성
 
+### 현재 상태
+
+승인.
+
+정리:
+
+- `service.game`, `service.game_release`, `service.game_localization`의 핵심 projection 재구성이 구현되었다.
+- `calendar` 모듈 내부에서만 재구성 책임이 유지되었다.
+- FK 무결성을 지키는 replace 순서와 누락 참조 null 처리 로직이 정리되었다.
+- 변경된 `affectedGameIds` 범위만 대상으로 부분 재구성이 수행된다.
+- 핵심 source는 `updated_at` cursor가 아니라 projection diff 기반으로 전환되었다.
+- 아직 materialize하지 않는 source는 deferred dry-run으로 남기고 cursor를 전진시키지 않도록 정리되었다.
+- 관련 테스트와 repository support 테스트가 JDK 21 환경에서 통과했다는 리뷰가 있다.
+
+### 후속 메모
+
+- 대규모 full sweep 시 chunk 단위 재구성이 단일 트랜잭션 시간을 길게 만들 수 있으므로 메트릭을 보며 chunk/트랜잭션 전략을 조정할 수 있다.
+- `service.game.slug`의 UNIQUE 제약과 원천 데이터 품질 문제는 운영 중 예외 메시지와 함께 관찰할 필요가 있다.
+- `service.game.updated_at = now()` 정책은 하류 consumer가 생기면 false positive 변경 신호가 될 수 있으므로 이후 사용처가 생기면 다시 검토한다.
+- 핵심 projection rebuild SQL은 raw JDBC 비중이 높으므로 후속 단계에서 repository 통합 테스트로 더 강하게 고정할 수 있다.
+- 핵심 projection diff 계산과 rebuild SQL은 JDBC/Flyway 통합 테스트로 추가 보강하는 편이 안전하다.
+- core projection 컬럼 null 허용 마이그레이션이 장기 계약인지 Slice 4 이행용 완충인지 문서에 남겨 둘 필요가 있다.
+
 ### 목표
 
 캘린더 핵심 read model을 먼저 완성한다.
@@ -278,11 +301,16 @@
 - replace 순서와 FK 안정성
 - 루트 `game` row와 `game_release`/`game_localization` 관계 정합성
 - changed game만 부분 재구성되는지
+- 핵심 source가 projection diff 기반으로 계산되는지
+- 아직 소비하지 않는 source가 deferred dry-run 상태로 유지되는지
 
 ### 승인 기준
 
 - affected `game_id` 범위에 대해 3개 핵심 테이블이 재구성된다.
 - 기존에 영향 없는 game은 건드리지 않는다.
+- projection rebuild 실패 시 deferred source를 포함한 Slice 3 cursor가 전진하지 않는다.
+- 핵심 source는 projection diff 기반으로 계산되어 cursor 조기 소진 문제가 없다.
+- Slice 4가 아직 소비하지 않는 source는 deferred dry-run으로 남고 cursor를 전진시키지 않는다.
 
 ## Slice 5. game 종속 bridge projection 재구성
 

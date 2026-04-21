@@ -13,10 +13,12 @@
 - Slice 1은 승인 완료 상태다.
 - Slice 2 차원 테이블 증분 ETL은 승인 완료 상태다.
 - Slice 3 affected `game_id` 계산기도 승인 완료 상태다.
-- 다음 작업 시작점은 Slice 4 핵심 game projection 재구성이다.
+- Slice 4 핵심 game projection 재구성도 승인 완료 상태다.
+- 다음 작업 시작점은 Slice 5 game 종속 bridge projection 재구성이다.
 - Slice 1 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
 - Slice 2 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
-- Slice 3는 Slice 4 도입 전까지 dry-run으로 유지한다.
+- Slice 3 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
+- Slice 4 관련 잔여 이슈도 모두 non-blocking 후속 개선 항목으로 관리한다.
 
 ### Slice 2 후속 메모
 
@@ -25,9 +27,17 @@
 
 ### Slice 3 후속 메모
 
-- Slice 4 전까지는 dry-run으로 유지되어 cursor가 전진하지 않음
+- Slice 4 도입 전에는 dry-run으로 유지되어 cursor가 전진하지 않았음
 - 기존 환경에 남아 있을 수 있는 Slice 3 cursor는 운영 절차로 확인 필요
 - JDBC/Flyway 기준 repository 통합 테스트는 후속 보강 대상
+
+### Slice 4 후속 메모
+
+- 대규모 affected set에 대한 chunk 처리와 단일 트랜잭션 길이 모니터링
+- 핵심 projection rebuild SQL의 repository 통합 테스트 보강
+- `service.game.updated_at` 활용 consumer가 생길 경우 false positive 변경 신호 여부 재검토
+- core source는 projection diff 기반으로 유지되고 deferred source는 dry-run으로 남는 전략을 Slice 5/6에서도 깨지지 않게 유지
+- nullable migration이 장기 계약인지 이행용 완충인지 후속 문서화
 
 ## 2. 확정 제약사항
 

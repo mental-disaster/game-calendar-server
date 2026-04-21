@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.anyLong
 import org.mockito.Mockito.doAnswer
+import org.mockito.Mockito.doThrow
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.reset
@@ -27,6 +28,7 @@ import kotlin.test.assertTrue
 class ServiceEtlServiceTest {
     companion object {
         private const val SLICE3_CURSOR_TO = 500L
+        private val SLICE4_CORE_SOURCE_TABLES = setOf("game", "release_date", "game_localization")
         private val SLICE3_SOURCE_TABLES = listOf(
             "game",
             "release_date",
@@ -87,7 +89,7 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `syncs slice2 sources and records slice3 dry run calculations without advancing cursor`() {
+    fun `syncs slice2 sources and rebuilds slice4 core projections without advancing deferred slice3 cursors`() {
         `when`(repository.syncGameStatuses())
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 2, nextCursor = null))
         `when`(repository.syncPlatformLogos())
@@ -127,6 +129,7 @@ class ServiceEtlServiceTest {
         verify(repository, never()).findCursor("keyword")
         verify(repository, never()).findCursor("platform_logo")
         verify(repository, never()).findCursor("company")
+        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L, 103L, 104L))
 
         assertEquals(28, sourceLogs.size)
         val logsByTable = sourceLogs.associateBy { it.tableName }
@@ -148,16 +151,33 @@ class ServiceEtlServiceTest {
         assertEquals("completed", gameLog.status)
         assertEquals(3, gameLog.processedRows)
         assertNull(gameLog.cursorFrom)
-        assertEquals(SLICE3_CURSOR_TO, gameLog.cursorTo)
+        assertNull(gameLog.cursorTo)
         assertNotNull(gameLog.note)
-        assertTrue(gameLog.note!!.contains("dry-run"))
+        assertTrue(gameLog.note!!.contains("slice4 core projection rebuilt"))
+        assertTrue(!gameLog.note!!.contains("dry-run"))
 
         val releaseDateLog = logsByTable.getValue("release_date")
         assertEquals("completed", releaseDateLog.status)
         assertEquals(2, releaseDateLog.processedRows)
-        assertEquals(120L, releaseDateLog.cursorFrom)
-        assertEquals(SLICE3_CURSOR_TO, releaseDateLog.cursorTo)
-        assertTrue(releaseDateLog.note!!.contains("dry-run"))
+        assertNull(releaseDateLog.cursorFrom)
+        assertNull(releaseDateLog.cursorTo)
+        assertTrue(releaseDateLog.note!!.contains("slice4 core projection rebuilt"))
+
+        val involvedCompanyLog = logsByTable.getValue("involved_company")
+        assertEquals("completed", involvedCompanyLog.status)
+        assertEquals(1, involvedCompanyLog.processedRows)
+        assertEquals(130L, involvedCompanyLog.cursorFrom)
+        assertEquals(SLICE3_CURSOR_TO, involvedCompanyLog.cursorTo)
+        assertTrue(involvedCompanyLog.note!!.contains("deferred source dry-run"))
+        assertTrue(!involvedCompanyLog.note!!.contains("core projection rebuilt"))
+
+        val coverLog = logsByTable.getValue("cover")
+        assertEquals("completed", coverLog.status)
+        assertEquals(2, coverLog.processedRows)
+        assertEquals(140L, coverLog.cursorFrom)
+        assertEquals(SLICE3_CURSOR_TO, coverLog.cursorTo)
+        assertTrue(coverLog.note!!.contains("deferred source dry-run"))
+        assertTrue(!coverLog.note!!.contains("core projection rebuilt"))
 
         assertTrue(sourceLogs.none { it.status == "skipped" })
         assertEquals(emptyList(), cursorWrites)
@@ -166,7 +186,7 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `keeps slice2 diff-based sources cursorless and leaves slice3 cursors untouched during dry run`() {
+    fun `keeps slice2 diff-based sources cursorless and logs deferred slice3 sources without cursor writes after empty slice4 rebuild`() {
         `when`(repository.syncGameStatuses())
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 0, nextCursor = null))
         `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
@@ -191,10 +211,18 @@ class ServiceEtlServiceTest {
 
         assertEquals("completed", gameLog.status)
         assertEquals(0, gameLog.processedRows)
-        assertEquals(200L, gameLog.cursorFrom)
-        assertEquals(300L, gameLog.cursorTo)
-        assertTrue(gameLog.note!!.contains("dry-run"))
+        assertNull(gameLog.cursorFrom)
+        assertNull(gameLog.cursorTo)
+        assertTrue(gameLog.note!!.contains("slice4 core projection rebuilt"))
 
+        val websiteLog = sourceLogs.first { it.tableName == "website" }
+        assertEquals("completed", websiteLog.status)
+        assertEquals(0, websiteLog.processedRows)
+        assertEquals(200L, websiteLog.cursorFrom)
+        assertEquals(300L, websiteLog.cursorTo)
+        assertTrue(websiteLog.note!!.contains("deferred source dry-run"))
+
+        verify(repository).rebuildCoreGameProjections(emptySet())
         assertEquals(emptyList(), cursorWrites)
         verify(repository, never()).findCursor("game_status")
         verify(repository, never()).findCursor("platform_logo")
@@ -215,6 +243,30 @@ class ServiceEtlServiceTest {
         assertEquals(emptyList(), cursorWrites)
         assertEquals(emptyList(), sourceLogs)
         verify(affectedGameIdCalculator, never()).calculate(anyLong())
+        verify(repository, never()).rebuildCoreGameProjections(anyLongSet())
+    }
+
+    @Test
+    fun `marks run failed when slice4 core projection rebuild throws and does not advance slice3 cursors`() {
+        `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
+            slice3CalculationResult(
+                perTableGameIds = mapOf("game" to setOf(101L), "release_date" to setOf(102L)),
+            )
+        )
+        doThrow(RuntimeException("core projection rebuild failed"))
+            .`when`(repository)
+            .rebuildCoreGameProjections(anyLongSet())
+
+        val runId = UUID.randomUUID()
+
+        assertFailsWith<RuntimeException> {
+            service.run(runId, ServiceEtlTrigger.manual())
+        }
+
+        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L))
+        assertEquals(listOf("failed"), finishedStatuses)
+        assertEquals(emptyList(), cursorWrites)
+        assertTrue(sourceLogs.none { it.tableName in SLICE3_SOURCE_TABLES })
     }
 
     private fun stubEmptySlice2Syncs() {
@@ -254,16 +306,22 @@ class ServiceEtlServiceTest {
         noteByTable: Map<String, String> = emptyMap(),
     ): AffectedGameIdCalculationResult {
         val sourceResults = SLICE3_SOURCE_TABLES.map { tableName ->
+            val materializedInCurrentSlice = tableName in SLICE4_CORE_SOURCE_TABLES
             AffectedGameIdSourceResult(
                 tableName = tableName,
-                cursorFrom = cursorFromByTable[tableName],
-                cursorTo = cursorTo,
+                cursorFrom = if (materializedInCurrentSlice) null else cursorFromByTable[tableName],
+                cursorTo = if (materializedInCurrentSlice) null else cursorTo,
                 affectedGameIds = perTableGameIds[tableName].orEmpty(),
-                note = noteByTable[tableName] ?: "slice3 test note",
+                note = noteByTable[tableName]
+                    ?: if (materializedInCurrentSlice) "slice4 projection diff test note" else "slice4 deferred dry-run test note",
+                materializedInCurrentSlice = materializedInCurrentSlice,
+                advanceCursor = false,
             )
         }
         val affectedGameIds = linkedSetOf<Long>()
-        sourceResults.forEach { affectedGameIds += it.affectedGameIds }
+        sourceResults
+            .filter { it.materializedInCurrentSlice }
+            .forEach { affectedGameIds += it.affectedGameIds }
         return AffectedGameIdCalculationResult(
             affectedGameIds = affectedGameIds,
             sourceResults = sourceResults,
@@ -274,6 +332,12 @@ class ServiceEtlServiceTest {
     private fun <T> anyObject(type: Class<T>): T {
         org.mockito.Mockito.any(type)
         return null as T
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun anyLongSet(): Set<Long> {
+        org.mockito.ArgumentMatchers.anySet<Long>()
+        return emptySet()
     }
 
     @Suppress("UNCHECKED_CAST")

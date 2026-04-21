@@ -8,54 +8,55 @@ class AffectedGameIdCalculator(
     private val serviceEtlJdbcRepository: ServiceEtlJdbcRepository,
 ) {
     companion object {
+        private const val CORE_GAME_DIFF_NOTE =
+            "slice4 affected game_id diff calculated from service.game core projection fields"
+        private const val GAME_RELEASE_DIFF_NOTE =
+            "slice4 affected game_id diff calculated from service.game_release projection"
+        private const val GAME_LOCALIZATION_DIFF_NOTE =
+            "slice4 affected game_id diff calculated from service.game_localization projection"
         private const val INITIAL_FULL_SWEEP_NOTE =
-            "slice3 initial full sweep: cursor missing, projection materialization is not implemented yet"
+            "slice4 deferred source dry-run: initial full sweep because cursor is missing"
         private const val UPDATED_AT_DELTA_NOTE =
-            "slice3 affected game_id delta calculated from source updated_at, projection materialization is not implemented yet"
+            "slice4 deferred source dry-run: affected game_id delta calculated from source updated_at"
         private const val GAME_UPDATED_STRATEGY_NOTE =
-            "slice3 affected game_id delta calculated from ingest.game.updated_at, projection materialization is not implemented yet"
+            "slice4 deferred source dry-run: affected game_id delta calculated from ingest.game.updated_at"
     }
 
     private val sourceTables = listOf(
-        UpdatedAtSourceTable("game", serviceEtlJdbcRepository::findAffectedGameIdsFromGames),
-        UpdatedAtSourceTable("release_date", serviceEtlJdbcRepository::findAffectedGameIdsFromReleaseDates),
-        UpdatedAtSourceTable("involved_company", serviceEtlJdbcRepository::findAffectedGameIdsFromInvolvedCompanies),
-        UpdatedAtSourceTable("language_support", serviceEtlJdbcRepository::findAffectedGameIdsFromLanguageSupports),
-        UpdatedAtSourceTable("game_localization", serviceEtlJdbcRepository::findAffectedGameIdsFromGameLocalizations),
+        ProjectionDiffSourceTable(
+            tableName = "game",
+            note = CORE_GAME_DIFF_NOTE,
+            collector = serviceEtlJdbcRepository::findAffectedGameIdsFromCoreGameProjectionDiff,
+        ),
+        ProjectionDiffSourceTable(
+            tableName = "release_date",
+            note = GAME_RELEASE_DIFF_NOTE,
+            collector = serviceEtlJdbcRepository::findAffectedGameIdsFromGameReleaseProjectionDiff,
+        ),
+        UpdatedAtDryRunSourceTable("involved_company", serviceEtlJdbcRepository::findAffectedGameIdsFromInvolvedCompanies),
+        UpdatedAtDryRunSourceTable("language_support", serviceEtlJdbcRepository::findAffectedGameIdsFromLanguageSupports),
+        ProjectionDiffSourceTable(
+            tableName = "game_localization",
+            note = GAME_LOCALIZATION_DIFF_NOTE,
+            collector = serviceEtlJdbcRepository::findAffectedGameIdsFromGameLocalizationProjectionDiff,
+        ),
         // These sources are fetched in ingest by changed game IDs, so ingest.game.updated_at is the stable delta boundary.
-        GameUpdatedSourceTable("cover"),
-        GameUpdatedSourceTable("artwork"),
-        GameUpdatedSourceTable("screenshot"),
-        GameUpdatedSourceTable("game_video"),
-        GameUpdatedSourceTable("website"),
-        GameUpdatedSourceTable("alternative_name"),
+        GameUpdatedDryRunSourceTable("cover"),
+        GameUpdatedDryRunSourceTable("artwork"),
+        GameUpdatedDryRunSourceTable("screenshot"),
+        GameUpdatedDryRunSourceTable("game_video"),
+        GameUpdatedDryRunSourceTable("website"),
+        GameUpdatedDryRunSourceTable("alternative_name"),
     )
 
     fun calculate(syncStartedAt: Long): AffectedGameIdCalculationResult {
         val allGameIds by lazy { serviceEtlJdbcRepository.findAllIngestGameIds().toSet() }
-        val sourceResults = sourceTables.map { sourceTable ->
-            val cursorFrom = serviceEtlJdbcRepository.findCursor(sourceTable.tableName)
-            if (cursorFrom == null) {
-                AffectedGameIdSourceResult(
-                    tableName = sourceTable.tableName,
-                    cursorFrom = null,
-                    cursorTo = syncStartedAt,
-                    affectedGameIds = allGameIds,
-                    note = INITIAL_FULL_SWEEP_NOTE,
-                )
-            } else {
-                AffectedGameIdSourceResult(
-                    tableName = sourceTable.tableName,
-                    cursorFrom = cursorFrom,
-                    cursorTo = syncStartedAt,
-                    affectedGameIds = sourceTable.collect(cursorFrom),
-                    note = sourceTable.note,
-                )
-            }
-        }
+        val sourceResults = sourceTables.map { sourceTable -> sourceTable.collect(syncStartedAt) { allGameIds } }
 
         val affectedGameIds = linkedSetOf<Long>()
-        sourceResults.forEach { result -> affectedGameIds += result.affectedGameIds }
+        sourceResults
+            .filter { result -> result.materializedInCurrentSlice }
+            .forEach { result -> affectedGameIds += result.affectedGameIds }
 
         return AffectedGameIdCalculationResult(
             affectedGameIds = affectedGameIds,
@@ -65,27 +66,84 @@ class AffectedGameIdCalculator(
 
     private sealed interface SourceTableDefinition {
         val tableName: String
-        val note: String
 
-        fun collect(cursorFrom: Long): Set<Long>
+        fun collect(syncStartedAt: Long, allGameIds: () -> Set<Long>): AffectedGameIdSourceResult
     }
 
-    private data class UpdatedAtSourceTable(
+    private data class ProjectionDiffSourceTable(
+        override val tableName: String,
+        private val note: String,
+        private val collector: () -> Set<Long>,
+    ) : SourceTableDefinition {
+        override fun collect(syncStartedAt: Long, allGameIds: () -> Set<Long>): AffectedGameIdSourceResult =
+            AffectedGameIdSourceResult(
+                tableName = tableName,
+                cursorFrom = null,
+                cursorTo = null,
+                affectedGameIds = collector(),
+                note = note,
+                materializedInCurrentSlice = true,
+                advanceCursor = false,
+            )
+    }
+
+    private inner class UpdatedAtDryRunSourceTable(
         override val tableName: String,
         private val collector: (Long) -> Set<Long>,
     ) : SourceTableDefinition {
-        override val note: String = UPDATED_AT_DELTA_NOTE
-
-        override fun collect(cursorFrom: Long): Set<Long> = collector(cursorFrom)
+        override fun collect(syncStartedAt: Long, allGameIds: () -> Set<Long>): AffectedGameIdSourceResult {
+            val cursorFrom = serviceEtlJdbcRepository.findCursor(tableName)
+            return if (cursorFrom == null) {
+                AffectedGameIdSourceResult(
+                    tableName = tableName,
+                    cursorFrom = null,
+                    cursorTo = syncStartedAt,
+                    affectedGameIds = allGameIds(),
+                    note = INITIAL_FULL_SWEEP_NOTE,
+                    materializedInCurrentSlice = false,
+                    advanceCursor = false,
+                )
+            } else {
+                AffectedGameIdSourceResult(
+                    tableName = tableName,
+                    cursorFrom = cursorFrom,
+                    cursorTo = syncStartedAt,
+                    affectedGameIds = collector(cursorFrom),
+                    note = UPDATED_AT_DELTA_NOTE,
+                    materializedInCurrentSlice = false,
+                    advanceCursor = false,
+                )
+            }
+        }
     }
 
-    private inner class GameUpdatedSourceTable(
+    private inner class GameUpdatedDryRunSourceTable(
         override val tableName: String,
     ) : SourceTableDefinition {
-        override val note: String = GAME_UPDATED_STRATEGY_NOTE
-
-        override fun collect(cursorFrom: Long): Set<Long> =
-            serviceEtlJdbcRepository.findAffectedGameIdsFromGameUpdatedAt(cursorFrom)
+        override fun collect(syncStartedAt: Long, allGameIds: () -> Set<Long>): AffectedGameIdSourceResult {
+            val cursorFrom = serviceEtlJdbcRepository.findCursor(tableName)
+            return if (cursorFrom == null) {
+                AffectedGameIdSourceResult(
+                    tableName = tableName,
+                    cursorFrom = null,
+                    cursorTo = syncStartedAt,
+                    affectedGameIds = allGameIds(),
+                    note = INITIAL_FULL_SWEEP_NOTE,
+                    materializedInCurrentSlice = false,
+                    advanceCursor = false,
+                )
+            } else {
+                AffectedGameIdSourceResult(
+                    tableName = tableName,
+                    cursorFrom = cursorFrom,
+                    cursorTo = syncStartedAt,
+                    affectedGameIds = serviceEtlJdbcRepository.findAffectedGameIdsFromGameUpdatedAt(cursorFrom),
+                    note = GAME_UPDATED_STRATEGY_NOTE,
+                    materializedInCurrentSlice = false,
+                    advanceCursor = false,
+                )
+            }
+        }
     }
 }
 
@@ -97,7 +155,9 @@ data class AffectedGameIdCalculationResult(
 data class AffectedGameIdSourceResult(
     val tableName: String,
     val cursorFrom: Long?,
-    val cursorTo: Long,
+    val cursorTo: Long?,
     val affectedGameIds: Set<Long>,
     val note: String,
+    val materializedInCurrentSlice: Boolean,
+    val advanceCursor: Boolean,
 )

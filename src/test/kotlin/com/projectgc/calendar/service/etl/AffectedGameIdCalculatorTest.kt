@@ -8,6 +8,8 @@ import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AffectedGameIdCalculatorTest {
@@ -31,28 +33,62 @@ class AffectedGameIdCalculatorTest {
     private val calculator = AffectedGameIdCalculator(repository)
 
     @Test
-    fun `returns all games for every slice3 source on initial execution`() {
+    fun `returns core projection diffs and keeps deferred slice3 sources in dry-run on initial execution`() {
         val allGameIds = listOf(11L, 22L, 33L)
         `when`(repository.findCursor(anyObject(String::class.java))).thenReturn(null)
         `when`(repository.findAllIngestGameIds()).thenReturn(allGameIds)
+        `when`(repository.findAffectedGameIdsFromCoreGameProjectionDiff()).thenReturn(allGameIds.toSet())
+        `when`(repository.findAffectedGameIdsFromGameReleaseProjectionDiff()).thenReturn(allGameIds.toSet())
+        `when`(repository.findAffectedGameIdsFromGameLocalizationProjectionDiff()).thenReturn(allGameIds.toSet())
 
         val result = calculator.calculate(500L)
+        val resultsByTable = result.sourceResults.associateBy { it.tableName }
 
         assertEquals(allGameIds.toSet(), result.affectedGameIds)
         assertEquals(SLICE3_SOURCE_TABLES, result.sourceResults.map { it.tableName })
-        result.sourceResults.forEach { sourceResult ->
-            assertEquals(null, sourceResult.cursorFrom)
-            assertEquals(500L, sourceResult.cursorTo)
-            assertEquals(allGameIds.toSet(), sourceResult.affectedGameIds)
-            assertTrue(sourceResult.note.contains("initial full sweep"))
-        }
+        assertNull(resultsByTable.getValue("game").cursorFrom)
+        assertNull(resultsByTable.getValue("game").cursorTo)
+        assertEquals(allGameIds.toSet(), resultsByTable.getValue("game").affectedGameIds)
+        assertTrue(resultsByTable.getValue("game").note.contains("core projection fields"))
+        assertTrue(resultsByTable.getValue("game").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("game").advanceCursor)
+
+        assertNull(resultsByTable.getValue("release_date").cursorFrom)
+        assertNull(resultsByTable.getValue("release_date").cursorTo)
+        assertEquals(allGameIds.toSet(), resultsByTable.getValue("release_date").affectedGameIds)
+        assertTrue(resultsByTable.getValue("release_date").note.contains("service.game_release"))
+        assertTrue(resultsByTable.getValue("release_date").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("release_date").advanceCursor)
+
+        assertNull(resultsByTable.getValue("game_localization").cursorFrom)
+        assertNull(resultsByTable.getValue("game_localization").cursorTo)
+        assertEquals(allGameIds.toSet(), resultsByTable.getValue("game_localization").affectedGameIds)
+        assertTrue(resultsByTable.getValue("game_localization").note.contains("service.game_localization"))
+        assertTrue(resultsByTable.getValue("game_localization").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("game_localization").advanceCursor)
+
+        SLICE3_SOURCE_TABLES
+            .filterNot { it in setOf("game", "release_date", "game_localization") }
+            .forEach { tableName ->
+                val sourceResult = resultsByTable.getValue(tableName)
+                assertNull(sourceResult.cursorFrom)
+                assertEquals(500L, sourceResult.cursorTo)
+                assertEquals(allGameIds.toSet(), sourceResult.affectedGameIds)
+                assertTrue(sourceResult.note.contains("dry-run"))
+                assertFalse(sourceResult.materializedInCurrentSlice)
+                assertFalse(sourceResult.advanceCursor)
+            }
 
         verify(repository).findAllIngestGameIds()
+        verify(repository).findAffectedGameIdsFromCoreGameProjectionDiff()
+        verify(repository).findAffectedGameIdsFromGameReleaseProjectionDiff()
+        verify(repository).findAffectedGameIdsFromGameLocalizationProjectionDiff()
+        verify(repository, never()).findCursor("game")
+        verify(repository, never()).findCursor("release_date")
+        verify(repository, never()).findCursor("game_localization")
         verify(repository, never()).findAffectedGameIdsFromGames(anyLong())
         verify(repository, never()).findAffectedGameIdsFromReleaseDates(anyLong())
         verify(repository, never()).findAffectedGameIdsFromInvolvedCompanies(anyLong())
-        verify(repository, never()).findAffectedGameIdsFromLanguageSupports(anyLong())
-        verify(repository, never()).findAffectedGameIdsFromGameLocalizations(anyLong())
         verify(repository, never()).findAffectedGameIdsFromGameUpdatedAt(anyLong())
     }
 
@@ -71,11 +107,11 @@ class AffectedGameIdCalculatorTest {
         `when`(repository.findCursor("game_video")).thenReturn(64L)
         `when`(repository.findCursor("website")).thenReturn(null)
         `when`(repository.findCursor("alternative_name")).thenReturn(66L)
-        `when`(repository.findAffectedGameIdsFromGames(10L)).thenReturn(linkedSetOf(1L, 2L))
-        `when`(repository.findAffectedGameIdsFromReleaseDates(20L)).thenReturn(linkedSetOf(2L, 3L))
+        `when`(repository.findAffectedGameIdsFromCoreGameProjectionDiff()).thenReturn(linkedSetOf(1L, 2L))
+        `when`(repository.findAffectedGameIdsFromGameReleaseProjectionDiff()).thenReturn(linkedSetOf(2L, 3L))
         `when`(repository.findAffectedGameIdsFromInvolvedCompanies(30L)).thenReturn(linkedSetOf(4L))
         `when`(repository.findAffectedGameIdsFromLanguageSupports(40L)).thenReturn(linkedSetOf(5L))
-        `when`(repository.findAffectedGameIdsFromGameLocalizations(50L)).thenReturn(linkedSetOf(6L))
+        `when`(repository.findAffectedGameIdsFromGameLocalizationProjectionDiff()).thenReturn(linkedSetOf(6L))
         `when`(repository.findAffectedGameIdsFromGameUpdatedAt(61L)).thenReturn(linkedSetOf(7L))
         `when`(repository.findAffectedGameIdsFromGameUpdatedAt(62L)).thenReturn(linkedSetOf(8L))
         `when`(repository.findAffectedGameIdsFromGameUpdatedAt(63L)).thenReturn(linkedSetOf(9L))
@@ -85,7 +121,7 @@ class AffectedGameIdCalculatorTest {
         val result = calculator.calculate(700L)
         val resultsByTable = result.sourceResults.associateBy { it.tableName }
 
-        assertEquals(allGameIds.toSet(), result.affectedGameIds)
+        assertEquals(linkedSetOf(1L, 2L, 3L, 6L), result.affectedGameIds)
         assertEquals(linkedSetOf(1L, 2L), resultsByTable.getValue("game").affectedGameIds)
         assertEquals(linkedSetOf(2L, 3L), resultsByTable.getValue("release_date").affectedGameIds)
         assertEquals(linkedSetOf(4L), resultsByTable.getValue("involved_company").affectedGameIds)
@@ -97,18 +133,34 @@ class AffectedGameIdCalculatorTest {
         assertEquals(linkedSetOf(1L, 9L), resultsByTable.getValue("game_video").affectedGameIds)
         assertEquals(allGameIds.toSet(), resultsByTable.getValue("website").affectedGameIds)
         assertEquals(linkedSetOf(2L), resultsByTable.getValue("alternative_name").affectedGameIds)
+        assertNull(resultsByTable.getValue("game").cursorFrom)
+        assertNull(resultsByTable.getValue("game").cursorTo)
+        assertTrue(resultsByTable.getValue("game").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("game").advanceCursor)
+        assertNull(resultsByTable.getValue("release_date").cursorFrom)
+        assertNull(resultsByTable.getValue("release_date").cursorTo)
+        assertTrue(resultsByTable.getValue("release_date").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("release_date").advanceCursor)
         assertEquals(null, resultsByTable.getValue("website").cursorFrom)
         assertEquals(700L, resultsByTable.getValue("website").cursorTo)
-        assertTrue(resultsByTable.getValue("game").note.contains("source updated_at"))
+        assertFalse(resultsByTable.getValue("website").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("website").advanceCursor)
+        assertTrue(resultsByTable.getValue("game").note.contains("core projection fields"))
         assertTrue(resultsByTable.getValue("cover").note.contains("ingest.game.updated_at"))
         assertTrue(resultsByTable.getValue("website").note.contains("initial full sweep"))
 
         verify(repository).findAllIngestGameIds()
-        verify(repository).findAffectedGameIdsFromGames(10L)
-        verify(repository).findAffectedGameIdsFromReleaseDates(20L)
+        verify(repository).findAffectedGameIdsFromCoreGameProjectionDiff()
+        verify(repository).findAffectedGameIdsFromGameReleaseProjectionDiff()
         verify(repository).findAffectedGameIdsFromInvolvedCompanies(30L)
         verify(repository).findAffectedGameIdsFromLanguageSupports(40L)
-        verify(repository).findAffectedGameIdsFromGameLocalizations(50L)
+        verify(repository).findAffectedGameIdsFromGameLocalizationProjectionDiff()
+        verify(repository, never()).findCursor("game")
+        verify(repository, never()).findCursor("release_date")
+        verify(repository, never()).findCursor("game_localization")
+        verify(repository, never()).findAffectedGameIdsFromGames(anyLong())
+        verify(repository, never()).findAffectedGameIdsFromReleaseDates(anyLong())
+        verify(repository, never()).findAffectedGameIdsFromGameLocalizations(anyLong())
         verify(repository).findAffectedGameIdsFromGameUpdatedAt(61L)
         verify(repository).findAffectedGameIdsFromGameUpdatedAt(62L)
         verify(repository).findAffectedGameIdsFromGameUpdatedAt(63L)
