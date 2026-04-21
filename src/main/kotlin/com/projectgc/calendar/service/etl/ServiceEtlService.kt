@@ -12,6 +12,7 @@ import java.util.UUID
 @Service
 class ServiceEtlService(
     private val serviceEtlJdbcRepository: ServiceEtlJdbcRepository,
+    private val affectedGameIdCalculator: AffectedGameIdCalculator,
     private val transactionTemplate: TransactionTemplate,
 ) : ServiceEtlRunner {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -19,23 +20,8 @@ class ServiceEtlService(
     companion object {
         private const val COMPLETED = "completed"
         private const val FAILED = "failed"
-        private const val SKIPPED = "skipped"
-        private const val SLICE2_PENDING_NOTE =
-            "slice2 pending: game-dependent projection materialization is not implemented yet"
-
-        private val DEFERRED_SOURCE_TABLES = listOf(
-            "game",
-            "release_date",
-            "involved_company",
-            "language_support",
-            "game_localization",
-            "cover",
-            "artwork",
-            "screenshot",
-            "game_video",
-            "website",
-            "alternative_name",
-        )
+        private const val SLICE3_DRY_RUN_NOTE =
+            "dry-run: slice3 cursor is not advanced until projection materialization or durable affected-game handoff exists"
     }
 
     private val slice2SourceTables = listOf(
@@ -64,9 +50,10 @@ class ServiceEtlService(
         serviceEtlJdbcRepository.insertRunLog(runId, trigger, startedAt)
 
         try {
+            var affectedGameCount = 0
             transactionTemplate.executeWithoutResult {
                 slice2SourceTables.forEach { sourceTable -> syncSourceTable(runId, sourceTable) }
-                DEFERRED_SOURCE_TABLES.forEach { tableName -> logSkippedSource(runId, tableName) }
+                affectedGameCount = recordAffectedGameIdsDryRun(runId, startedAt.epochSecond)
             }
 
             serviceEtlJdbcRepository.finishRunLog(
@@ -74,7 +61,7 @@ class ServiceEtlService(
                 finishedAt = Instant.now(),
                 status = COMPLETED,
             )
-            log.info("service ETL 완료 (runId=$runId)")
+            log.info("service ETL 완료 (runId=$runId, affectedGames=$affectedGameCount)")
         } catch (ex: Exception) {
             runCatching {
                 serviceEtlJdbcRepository.finishRunLog(
@@ -124,22 +111,25 @@ class ServiceEtlService(
         )
     }
 
-    private fun logSkippedSource(runId: UUID, tableName: String) {
-        val loggedAt = Instant.now()
-        val cursor = serviceEtlJdbcRepository.findCursor(tableName)
-        serviceEtlJdbcRepository.insertSourceLog(
-            ServiceEtlSourceLogEntry(
-                runId = runId,
-                tableName = tableName,
-                status = SKIPPED,
-                processedRows = 0,
-                cursorFrom = cursor,
-                cursorTo = cursor,
-                note = SLICE2_PENDING_NOTE,
-                startedAt = loggedAt,
-                finishedAt = loggedAt,
+    private fun recordAffectedGameIdsDryRun(runId: UUID, syncStartedAt: Long): Int {
+        val calculationResult = affectedGameIdCalculator.calculate(syncStartedAt)
+        calculationResult.sourceResults.forEach { sourceResult ->
+            val loggedAt = Instant.now()
+            serviceEtlJdbcRepository.insertSourceLog(
+                ServiceEtlSourceLogEntry(
+                    runId = runId,
+                    tableName = sourceResult.tableName,
+                    status = COMPLETED,
+                    processedRows = sourceResult.affectedGameIds.size,
+                    cursorFrom = sourceResult.cursorFrom,
+                    cursorTo = sourceResult.cursorTo,
+                    note = "${sourceResult.note}; $SLICE3_DRY_RUN_NOTE",
+                    startedAt = loggedAt,
+                    finishedAt = loggedAt,
+                )
             )
-        )
+        }
+        return calculationResult.affectedGameIds.size
     }
 }
 

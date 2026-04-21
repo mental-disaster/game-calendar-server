@@ -127,7 +127,7 @@
 
 ### 현재 상태
 
-승인 보류. 재검증 필요.
+승인.
 
 정리:
 
@@ -135,26 +135,13 @@
 - 17개 차원 테이블의 증분 ETL이 연결되었다.
 - source table 특성에 따라 커서 기반 전략과 diff 기반 전략이 분리되었다.
 - `platform_logo`는 diff 기반 병합으로 처리된다.
+- `company` 자기참조 FK와 source table별 증분 전략 관련 blocking 이슈는 최신 수정본에서 해소된 것으로 리뷰 확인되었다.
 - Slice 2 관련 테스트가 실제 JDK 21 환경에서 통과했다는 리뷰가 있다.
-
-보류 사유:
-
-- 리뷰어 2명이 각각 `NON-PASS`를 부여한 blocking issue가 있었고, 그 이슈가 최신 코드에서 실제로 해소됐는지 계획 수준에서 독립 검증하지 못했다.
-- 특히 아래 2개는 해소 확인 전까지 Slice 2를 승인 상태로 두면 안 된다.
-  - `company` 자기참조 FK가 참조 대상 부재 시 런타임 실패를 유발하는지
-  - `updated_at` 전용 cursor 전략이 snapshot/paginated source table에서 late-arriving row를 영구 누락시키는지
 
 ### 후속 메모
 
 - 초기 동기화 시 차원 테이블 전체를 한 번에 메모리로 읽는 방식은 현재 규모에선 허용되지만, 데이터가 커지면 chunk/streaming 방식으로 바꾸는 것을 검토한다.
 - 차원 테이블 null 허용 마이그레이션의 장기 계약은 후속 consumer 관점에서 다시 점검할 수 있다.
-
-### 재검증 필수 항목
-
-- `syncCompanies`가 `service.company`에 아직 없는 parent/merged target을 FK 위반 없이 처리하는지 확인
-- snapshot/전체 페이지네이션 기반 source table들이 `updated_at` nullable/old value 환경에서도 신규 row를 영구 누락하지 않는지 확인
-- 위 2개 경계를 고정하는 테스트 존재 여부 확인
-- 해결 확인 전까지 Slice 3로 넘어가지 않음
 
 ### 목표
 
@@ -205,6 +192,27 @@
 
 ## Slice 3. affected `game_id` 계산기
 
+### 현재 상태
+
+승인.
+
+정리:
+
+- `calendar` 내부에서만 source 계산이 닫혀 있는 구조는 유지되었다.
+- 11개 source table 모두에 대해 affected `game_id` 계산 경로가 구현되었다.
+- 초기 실행 시 전체 game sweep과 source table별 delta union이 구현되었다.
+- Slice 3는 projection materialization 도입 전까지 dry-run으로 전환되어 cursor를 전진시키지 않는다.
+- 따라서 Slice 4 도입 전 변경분이 영구 소진되지 않도록 방어되었다.
+- 관련 단위 테스트와 서비스 레벨 테스트가 JDK 21 환경에서 통과했다는 리뷰가 있다.
+
+### 후속 메모
+
+- 미디어/부가 테이블이 `ingest.game.updated_at`을 대리 커서로 사용하는 도메인 계약은 타당하지만, calculator 코드나 계획 문서에 짧은 주석으로 남겨두면 유지보수성이 더 좋아진다.
+- 초기 전체 sweep 시 모든 game id를 메모리에 Set으로 적재하는 방식은 현 규모에서 허용 가능하더라도, 이후 Slice 4~6에서 chunk 처리 전략이 필요할 수 있다.
+- Slice 3 계산 자체의 JDBC 동작은 향후 repository 통합 테스트로 더 강하게 고정할 수 있다.
+- 이전 실험 버전이나 수동 조작으로 이미 Slice 3 cursor가 전진한 환경이 있다면, 운영 절차로 초기화/무시 기준을 확인하는 것이 안전하다.
+- Slice 4에서 실제 projection materialization이 들어오면 dry-run note와 cursor 정책을 함께 해제해야 한다.
+
 ### 목표
 
 어떤 원천 변경이 game 재구성을 유발하는지 계산하는 로직을 독립적으로 구현한다.
@@ -235,11 +243,15 @@
 - 누락 없는 영향 범위 계산
 - 초기 실행/커서 없음 시 전체 game 선택 처리
 - source table 별 커서 사용 일관성
+- 계산된 affected 집합이 projection 재구성 전에 유실되지 않는지
+- cursor 전진 시점이 downstream 소비 성공과 정합적인지
 
 ### 승인 기준
 
 - source table 변경에 따라 affected `game_id` 집합을 계산할 수 있다.
 - 초기 실행에서는 전체 game을 반환한다.
+- projection materialization 또는 동등한 durable handoff 없이 Slice 3 cursor가 먼저 전진하지 않는다.
+- Slice 4 도입 전에도 Slice 3 변경분이 영구 소진되지 않는다.
 
 ## Slice 4. 핵심 game projection 재구성
 

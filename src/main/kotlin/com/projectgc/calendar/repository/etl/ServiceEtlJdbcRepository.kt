@@ -99,6 +99,42 @@ class ServiceEtlJdbcRepository(
         )
     }
 
+    fun findAllIngestGameIds(): List<Long> =
+        jdbc.query(
+            """
+            SELECT id
+            FROM ingest.game
+            ORDER BY id
+            """.trimIndent(),
+        ) { rs, _ -> rs.getLong("id") }
+
+    fun findAffectedGameIdsFromGames(cursorFrom: Long): Set<Long> =
+        jdbc.query(
+            """
+            SELECT id
+            FROM ingest.game
+            WHERE updated_at > ?
+            ORDER BY id
+            """.trimIndent(),
+            { rs, _ -> rs.getLong("id") },
+            cursorFrom,
+        ).toCollection(linkedSetOf())
+
+    fun findAffectedGameIdsFromReleaseDates(cursorFrom: Long): Set<Long> =
+        findDistinctGameIdsByUpdatedAt("release_date", cursorFrom)
+
+    fun findAffectedGameIdsFromInvolvedCompanies(cursorFrom: Long): Set<Long> =
+        findDistinctGameIdsByUpdatedAt("involved_company", cursorFrom)
+
+    fun findAffectedGameIdsFromLanguageSupports(cursorFrom: Long): Set<Long> =
+        findDistinctGameIdsByUpdatedAt("language_support", cursorFrom)
+
+    fun findAffectedGameIdsFromGameLocalizations(cursorFrom: Long): Set<Long> =
+        findDistinctGameIdsByUpdatedAt("game_localization", cursorFrom)
+
+    fun findAffectedGameIdsFromGameUpdatedAt(cursorFrom: Long): Set<Long> =
+        findAffectedGameIdsFromGames(cursorFrom)
+
     fun syncGameStatuses() = syncNamedDimensionByDiff(
         sourceTable = "game_status",
         sourceValueColumn = "status",
@@ -475,6 +511,19 @@ class ServiceEtlJdbcRepository(
         }
         return diffResult(rows.size)
     }
+
+    private fun findDistinctGameIdsByUpdatedAt(tableName: String, cursorFrom: Long): Set<Long> =
+        jdbc.query(
+            """
+            SELECT DISTINCT game
+            FROM ingest.$tableName
+            WHERE updated_at > ?
+              AND game IS NOT NULL
+            ORDER BY game
+            """.trimIndent(),
+            { rs, _ -> rs.getLong("game") },
+            cursorFrom,
+        ).toCollection(linkedSetOf())
 
     private fun loadIdSet(tableName: String): Set<Long> =
         jdbc.query("SELECT id FROM $tableName") { rs, _ -> rs.getLong("id") }.toSet()
