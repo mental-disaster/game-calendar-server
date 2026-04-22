@@ -8,33 +8,50 @@ class AffectedGameIdCalculator(
     private val serviceEtlJdbcRepository: ServiceEtlJdbcRepository,
 ) {
     companion object {
-        private const val CORE_GAME_DIFF_NOTE =
-            "slice4 affected game_id diff calculated from service.game core projection fields"
+        private const val GAME_PROJECTION_DIFF_NOTE =
+            "slice5 affected game_id diff calculated from service.game core and bridge projections"
         private const val GAME_RELEASE_DIFF_NOTE =
-            "slice4 affected game_id diff calculated from service.game_release projection"
+            "slice5 affected game_id diff calculated from service.game_release projection"
+        private const val INVOLVED_COMPANY_DIFF_NOTE =
+            "slice5 affected game_id diff calculated from service.game_company projection"
+        private const val LANGUAGE_SUPPORT_DIFF_NOTE =
+            "slice5 affected game_id diff calculated from service.game_language projection"
         private const val GAME_LOCALIZATION_DIFF_NOTE =
-            "slice4 affected game_id diff calculated from service.game_localization projection"
+            "slice5 affected game_id diff calculated from service.game_localization projection"
         private const val INITIAL_FULL_SWEEP_NOTE =
-            "slice4 deferred source dry-run: initial full sweep because cursor is missing"
+            "slice5 deferred source dry-run: initial full sweep because cursor is missing"
         private const val UPDATED_AT_DELTA_NOTE =
-            "slice4 deferred source dry-run: affected game_id delta calculated from source updated_at"
+            "slice5 deferred source dry-run: affected game_id delta calculated from source updated_at"
         private const val GAME_UPDATED_STRATEGY_NOTE =
-            "slice4 deferred source dry-run: affected game_id delta calculated from ingest.game.updated_at"
+            "slice5 deferred source dry-run: affected game_id delta calculated from ingest.game.updated_at"
     }
 
     private val sourceTables = listOf(
         ProjectionDiffSourceTable(
             tableName = "game",
-            note = CORE_GAME_DIFF_NOTE,
-            collector = serviceEtlJdbcRepository::findAffectedGameIdsFromCoreGameProjectionDiff,
+            note = GAME_PROJECTION_DIFF_NOTE,
+            collector = {
+                linkedSetOf<Long>().apply {
+                    addAll(serviceEtlJdbcRepository.findAffectedGameIdsFromCoreGameProjectionDiff())
+                    addAll(serviceEtlJdbcRepository.findAffectedGameIdsFromGameBridgeProjectionDiff())
+                }
+            },
         ),
         ProjectionDiffSourceTable(
             tableName = "release_date",
             note = GAME_RELEASE_DIFF_NOTE,
             collector = serviceEtlJdbcRepository::findAffectedGameIdsFromGameReleaseProjectionDiff,
         ),
-        UpdatedAtDryRunSourceTable("involved_company", serviceEtlJdbcRepository::findAffectedGameIdsFromInvolvedCompanies),
-        UpdatedAtDryRunSourceTable("language_support", serviceEtlJdbcRepository::findAffectedGameIdsFromLanguageSupports),
+        ProjectionDiffSourceTable(
+            tableName = "involved_company",
+            note = INVOLVED_COMPANY_DIFF_NOTE,
+            collector = serviceEtlJdbcRepository::findAffectedGameIdsFromInvolvedCompanyProjectionDiff,
+        ),
+        ProjectionDiffSourceTable(
+            tableName = "language_support",
+            note = LANGUAGE_SUPPORT_DIFF_NOTE,
+            collector = serviceEtlJdbcRepository::findAffectedGameIdsFromLanguageSupportProjectionDiff,
+        ),
         ProjectionDiffSourceTable(
             tableName = "game_localization",
             note = GAME_LOCALIZATION_DIFF_NOTE,

@@ -314,6 +314,30 @@
 
 ## Slice 5. game 종속 bridge projection 재구성
 
+### 현재 상태
+
+승인.
+
+정리:
+
+- `service.game_language`, `service.game_genre`, `service.game_theme`, `service.game_player_perspective`, `service.game_game_mode`, `service.game_keyword`, `service.game_company`, `service.game_relation` 재구성 경로가 `calendar` 내부에 구현되었다.
+- delete-by-`game_id` 후 batch insert 패턴으로 stale row 제거 방향은 맞다.
+- `involved_company`, `language_support`, game bridge 계열은 projection diff 기반 계산으로 전환되었다.
+- Slice 6 대상 source는 deferred dry-run으로 유지된다.
+- `game_relation` affected set 계산은 `service.game`이 아니라 `ingest.game` 기준 relation diff로 수정되어, 같은 run에서 새로 materialize되는 related game도 즉시 반영할 수 있게 되었다.
+- relation diff와 rebuild 경계를 고정하는 integration test가 추가되었다.
+- 관련 단위 테스트, 서비스 레벨 테스트, repository integration test가 JDK 21 환경에서 통과했다는 리뷰가 있다.
+
+### 후속 메모
+
+- `UpdatedAtDryRunSourceTable`과 더 이상 호출되지 않는 cursor 기반 repository 메서드는 정리 후보로 남는다.
+- `SLICE5_GAME_PROJECTION_NOTE`는 길이가 길어 source log 해석 시 오해를 줄 수 있으므로 후속 정리가 가능하다.
+- bridge rebuild SQL과 diff SQL은 Postgres 의존 구문이 많아 repository 통합 테스트 보강 우선순위가 높다.
+- `involved_company`/`language_support`/bridge diff에서 `INNER JOIN service.*`를 쓰는 이유와 stale row를 반대쪽 `UNION`이 복구한다는 의도를 코드 주석으로 남기는 편이 안전하다.
+- 가장 중요한 relation 회귀 테스트가 `integrationTest` task에만 묶여 있으므로, CI나 로컬 기본 워크플로가 `test`만 돌릴 경우 놓칠 수 있다.
+- 현재 integration test는 최소 스키마 수기 생성 방식이라, 장기적으로는 실제 Flyway 스키마 기반 검증으로 옮기는 편이 안전하다.
+- `game_language`, `game_company`, 배열 bridge 계열의 DB 통합 테스트는 relation 수준으로 아직 확장되지 않았다.
+
 ### 목표
 
 관계/집계 성격의 projection을 추가한다.
@@ -340,10 +364,73 @@
 - 배열/관계 기반 source에서 stale row 없이 replace되는지
 - 집계 플래그 계산 정확성
 - 역할/관계 타입 매핑 정확성
+- `game_relation` affected set이 같은 run의 신규 related game materialization을 놓치지 않는지
+- relation 회귀 테스트가 기본 테스트 경로 밖에 있다는 점을 운영/CI에서 인지하고 있는지
 
 ### 승인 기준
 
 - bridge/집계 projection이 affected `game_id` 기준으로 정확히 replace된다.
+- 같은 run에서 새로 materialize되는 related game 때문에 생기는 `service.game_relation` row도 즉시 반영된다.
+
+## Slice 5A. DB 분리 대응: Datasource/Repository 분리
+
+### 현재 상태
+
+예정.
+
+### 목표
+
+향후 `ingest DB`와 `service DB`가 분리되더라도 ETL이 유지되도록, `datasource`, `repository`, `transaction` 경계를 분리한다.
+
+### 분리 단계 전제
+
+- 단계 i: `batch`와 `calendar` 서비스 분리. 서버는 분리되지만 두 서비스가 두 DB에 모두 접근할 수 있을 수 있다.
+- 단계 ii: `ingest DB`와 `service DB` 분리. 여전히 각 서비스에서 두 DB 접근은 가능하지만, 한 SQL에서 두 DB를 join할 수는 없다.
+- 단계 iii: `batch+ingest`, `calendar+service` 책임 완전 분리. 데이터 전달은 HTTP/RPC 등 프로토콜 기반으로 수행한다.
+
+### 포함 범위
+
+- Slice 2~5에서 사용 중인 cross-db query 전수 식별
+- 차원 diff, core projection diff, bridge projection diff에서 `ingest + service` 동시 참조 제거
+- `calendar` 내부 datasource를 `ingest read`와 `service write/read`로 분리
+- 하나의 repository가 두 DB를 함께 다루지 않도록 책임 분해
+- `calendar`가 `ingest`를 읽는 단계와 `service`를 비교/적용하는 단계 분리
+- 필요 시 `service` 소유 staging/temp snapshot 또는 동등한 중간 표현 도입
+- 이후 단계 iii에서 HTTP/RPC handoff로 바꿔도 재사용 가능한 내부 계약 정리
+
+### 제외 범위
+
+- Slice 6 미디어/부가 projection 구현
+- 실제 HTTP/RPC 전송 구현
+- 최종 분리 배포 절차
+
+### 권장 방향
+
+- `calendar`는 `ingest` DB용 reader repository와 `service` DB용 projection repository를 분리해 가진다.
+- `ingest` DB에서는 source row 또는 expected projection row만 읽는다.
+- 그 결과는 애플리케이션 메모리 또는 `service` 쪽 staging/temp 구조로 옮긴다.
+- 이후 diff 계산과 rebuild는 `service` DB repository 안에서만 수행한다.
+- 즉 "source 추출"과 "service 적용"은 같은 ETL run 안에 있어도 되지만, 같은 repository/같은 SQL/같은 DB 트랜잭션으로 묶지 않는다.
+
+### 리뷰 포인트
+
+- `ingest`와 `service`를 동시에 참조하는 SQL이 남아 있지 않은지
+- 하나의 repository/DAO가 두 DB 접근을 동시에 소유하지 않는지
+- datasource 설정이 `ingest read`와 `service write/read`로 명시적으로 분리되는지
+- `calendar`가 두 DB를 읽더라도 비교/적용 단계가 분리되어 있는지
+- 기존 Slice 2~5의 정합성 계약이 유지되는지
+- 단계 ii에서 DB만 먼저 분리돼도 같은 ETL 로직이 유지 가능한지
+- 단계 iii에서 source 전달 방식만 바꾸면 되는 구조로 좁혀졌는지
+
+### 승인 기준
+
+- Slice 2~5 경로에서 `ingest`와 `service`를 같은 SQL에서 함께 참조하는 쿼리가 제거된다.
+- `calendar`는 `ingest`용 repository와 `service`용 repository를 분리해 가진다.
+- 하나의 repository/DAO는 한 DB 책임만 가진다.
+- `calendar`는 여전히 `ingest`와 `service`에 각각 접근할 수 있지만, cross-db join 없이 ETL을 수행한다.
+- ETL은 두 DB에 걸친 단일 트랜잭션을 전제하지 않는다.
+- 차원 diff, core projection diff, bridge projection diff 결과가 기존과 동일한 정합성을 유지한다.
+- Slice 6은 이 선행 정리를 전제로 구현된다.
 
 ## Slice 6. 미디어/부가 projection 재구성
 

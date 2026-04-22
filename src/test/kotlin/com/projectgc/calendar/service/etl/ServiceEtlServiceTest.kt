@@ -28,7 +28,13 @@ import kotlin.test.assertTrue
 class ServiceEtlServiceTest {
     companion object {
         private const val SLICE3_CURSOR_TO = 500L
-        private val SLICE4_CORE_SOURCE_TABLES = setOf("game", "release_date", "game_localization")
+        private val SLICE5_MATERIALIZED_SOURCE_TABLES = setOf(
+            "game",
+            "release_date",
+            "involved_company",
+            "language_support",
+            "game_localization",
+        )
         private val SLICE3_SOURCE_TABLES = listOf(
             "game",
             "release_date",
@@ -89,7 +95,7 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `syncs slice2 sources and rebuilds slice4 core projections without advancing deferred slice3 cursors`() {
+    fun `syncs slice2 sources and rebuilds slice5 game projections without advancing deferred slice6 cursors`() {
         `when`(repository.syncGameStatuses())
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 2, nextCursor = null))
         `when`(repository.syncPlatformLogos())
@@ -108,16 +114,17 @@ class ServiceEtlServiceTest {
                     "game" to setOf(101L, 102L, 103L),
                     "release_date" to setOf(103L, 104L),
                     "involved_company" to setOf(105L),
-                    "cover" to setOf(101L, 106L),
+                    "language_support" to setOf(106L),
+                    "cover" to setOf(101L, 107L),
                 ),
                 cursorFromByTable = mapOf(
-                    "release_date" to 120L,
                     "involved_company" to 130L,
+                    "language_support" to 135L,
                     "cover" to 140L,
                 ),
                 noteByTable = mapOf(
-                    "game" to "slice3 initial full sweep",
-                    "cover" to "slice3 game updated_at delta",
+                    "game" to "slice5 projection diff",
+                    "cover" to "slice5 game updated_at delta",
                 ),
             )
         )
@@ -129,7 +136,8 @@ class ServiceEtlServiceTest {
         verify(repository, never()).findCursor("keyword")
         verify(repository, never()).findCursor("platform_logo")
         verify(repository, never()).findCursor("company")
-        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L, 103L, 104L))
+        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L, 103L, 104L, 105L, 106L))
+        verify(repository).rebuildGameDependentBridgeProjections(setOf(101L, 102L, 103L, 104L, 105L, 106L))
 
         assertEquals(28, sourceLogs.size)
         val logsByTable = sourceLogs.associateBy { it.tableName }
@@ -153,7 +161,7 @@ class ServiceEtlServiceTest {
         assertNull(gameLog.cursorFrom)
         assertNull(gameLog.cursorTo)
         assertNotNull(gameLog.note)
-        assertTrue(gameLog.note!!.contains("slice4 core projection rebuilt"))
+        assertTrue(gameLog.note!!.contains("slice5 projections rebuilt"))
         assertTrue(!gameLog.note!!.contains("dry-run"))
 
         val releaseDateLog = logsByTable.getValue("release_date")
@@ -161,15 +169,21 @@ class ServiceEtlServiceTest {
         assertEquals(2, releaseDateLog.processedRows)
         assertNull(releaseDateLog.cursorFrom)
         assertNull(releaseDateLog.cursorTo)
-        assertTrue(releaseDateLog.note!!.contains("slice4 core projection rebuilt"))
+        assertTrue(releaseDateLog.note!!.contains("slice5 projections rebuilt"))
 
         val involvedCompanyLog = logsByTable.getValue("involved_company")
         assertEquals("completed", involvedCompanyLog.status)
         assertEquals(1, involvedCompanyLog.processedRows)
-        assertEquals(130L, involvedCompanyLog.cursorFrom)
-        assertEquals(SLICE3_CURSOR_TO, involvedCompanyLog.cursorTo)
-        assertTrue(involvedCompanyLog.note!!.contains("deferred source dry-run"))
-        assertTrue(!involvedCompanyLog.note!!.contains("core projection rebuilt"))
+        assertNull(involvedCompanyLog.cursorFrom)
+        assertNull(involvedCompanyLog.cursorTo)
+        assertTrue(involvedCompanyLog.note!!.contains("slice5 projections rebuilt"))
+
+        val languageSupportLog = logsByTable.getValue("language_support")
+        assertEquals("completed", languageSupportLog.status)
+        assertEquals(1, languageSupportLog.processedRows)
+        assertNull(languageSupportLog.cursorFrom)
+        assertNull(languageSupportLog.cursorTo)
+        assertTrue(languageSupportLog.note!!.contains("slice5 projections rebuilt"))
 
         val coverLog = logsByTable.getValue("cover")
         assertEquals("completed", coverLog.status)
@@ -177,7 +191,7 @@ class ServiceEtlServiceTest {
         assertEquals(140L, coverLog.cursorFrom)
         assertEquals(SLICE3_CURSOR_TO, coverLog.cursorTo)
         assertTrue(coverLog.note!!.contains("deferred source dry-run"))
-        assertTrue(!coverLog.note!!.contains("core projection rebuilt"))
+        assertTrue(!coverLog.note!!.contains("slice5 projections rebuilt"))
 
         assertTrue(sourceLogs.none { it.status == "skipped" })
         assertEquals(emptyList(), cursorWrites)
@@ -186,7 +200,7 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `keeps slice2 diff-based sources cursorless and logs deferred slice3 sources without cursor writes after empty slice4 rebuild`() {
+    fun `keeps slice2 diff-based sources cursorless and logs deferred slice6 sources without cursor writes after empty slice5 rebuild`() {
         `when`(repository.syncGameStatuses())
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 0, nextCursor = null))
         `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
@@ -213,7 +227,7 @@ class ServiceEtlServiceTest {
         assertEquals(0, gameLog.processedRows)
         assertNull(gameLog.cursorFrom)
         assertNull(gameLog.cursorTo)
-        assertTrue(gameLog.note!!.contains("slice4 core projection rebuilt"))
+        assertTrue(gameLog.note!!.contains("slice5 projections rebuilt"))
 
         val websiteLog = sourceLogs.first { it.tableName == "website" }
         assertEquals("completed", websiteLog.status)
@@ -223,6 +237,7 @@ class ServiceEtlServiceTest {
         assertTrue(websiteLog.note!!.contains("deferred source dry-run"))
 
         verify(repository).rebuildCoreGameProjections(emptySet())
+        verify(repository).rebuildGameDependentBridgeProjections(emptySet())
         assertEquals(emptyList(), cursorWrites)
         verify(repository, never()).findCursor("game_status")
         verify(repository, never()).findCursor("platform_logo")
@@ -244,18 +259,19 @@ class ServiceEtlServiceTest {
         assertEquals(emptyList(), sourceLogs)
         verify(affectedGameIdCalculator, never()).calculate(anyLong())
         verify(repository, never()).rebuildCoreGameProjections(anyLongSet())
+        verify(repository, never()).rebuildGameDependentBridgeProjections(anyLongSet())
     }
 
     @Test
-    fun `marks run failed when slice4 core projection rebuild throws and does not advance slice3 cursors`() {
+    fun `marks run failed when slice5 bridge projection rebuild throws and does not advance deferred source cursors`() {
         `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
             slice3CalculationResult(
-                perTableGameIds = mapOf("game" to setOf(101L), "release_date" to setOf(102L)),
+                perTableGameIds = mapOf("game" to setOf(101L), "release_date" to setOf(102L), "involved_company" to setOf(103L)),
             )
         )
-        doThrow(RuntimeException("core projection rebuild failed"))
+        doThrow(RuntimeException("bridge projection rebuild failed"))
             .`when`(repository)
-            .rebuildCoreGameProjections(anyLongSet())
+            .rebuildGameDependentBridgeProjections(anyLongSet())
 
         val runId = UUID.randomUUID()
 
@@ -263,7 +279,8 @@ class ServiceEtlServiceTest {
             service.run(runId, ServiceEtlTrigger.manual())
         }
 
-        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L))
+        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L, 103L))
+        verify(repository).rebuildGameDependentBridgeProjections(setOf(101L, 102L, 103L))
         assertEquals(listOf("failed"), finishedStatuses)
         assertEquals(emptyList(), cursorWrites)
         assertTrue(sourceLogs.none { it.tableName in SLICE3_SOURCE_TABLES })
@@ -306,14 +323,14 @@ class ServiceEtlServiceTest {
         noteByTable: Map<String, String> = emptyMap(),
     ): AffectedGameIdCalculationResult {
         val sourceResults = SLICE3_SOURCE_TABLES.map { tableName ->
-            val materializedInCurrentSlice = tableName in SLICE4_CORE_SOURCE_TABLES
+            val materializedInCurrentSlice = tableName in SLICE5_MATERIALIZED_SOURCE_TABLES
             AffectedGameIdSourceResult(
                 tableName = tableName,
                 cursorFrom = if (materializedInCurrentSlice) null else cursorFromByTable[tableName],
                 cursorTo = if (materializedInCurrentSlice) null else cursorTo,
                 affectedGameIds = perTableGameIds[tableName].orEmpty(),
                 note = noteByTable[tableName]
-                    ?: if (materializedInCurrentSlice) "slice4 projection diff test note" else "slice4 deferred dry-run test note",
+                    ?: if (materializedInCurrentSlice) "slice5 projection diff test note" else "slice5 deferred dry-run test note",
                 materializedInCurrentSlice = materializedInCurrentSlice,
                 advanceCursor = false,
             )

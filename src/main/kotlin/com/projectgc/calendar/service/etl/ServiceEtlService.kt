@@ -20,10 +20,10 @@ class ServiceEtlService(
     companion object {
         private const val COMPLETED = "completed"
         private const val FAILED = "failed"
-        private const val SLICE4_CORE_PROJECTION_NOTE =
-            "slice4 core projection rebuilt: service.game, service.game_release, service.game_localization"
-        private const val SLICE4_DEFERRED_SOURCE_NOTE =
-            "slice4 deferred source dry-run: cursor remains deferred until slice5/6 projection materialization"
+        private const val SLICE5_GAME_PROJECTION_NOTE =
+            "slice5 projections rebuilt: service.game, service.game_release, service.game_localization, service.game_language, service.game_genre, service.game_theme, service.game_player_perspective, service.game_game_mode, service.game_keyword, service.game_company, service.game_relation"
+        private const val SLICE5_DEFERRED_SOURCE_NOTE =
+            "slice5 deferred source dry-run: cursor remains deferred until slice6 projection materialization"
     }
 
     private val slice2SourceTables = listOf(
@@ -116,6 +116,7 @@ class ServiceEtlService(
     private fun rebuildAffectedGameProjections(runId: UUID, syncStartedAt: Long): Int {
         val calculationResult = affectedGameIdCalculator.calculate(syncStartedAt)
         serviceEtlJdbcRepository.rebuildCoreGameProjections(calculationResult.affectedGameIds)
+        serviceEtlJdbcRepository.rebuildGameDependentBridgeProjections(calculationResult.affectedGameIds)
         calculationResult.sourceResults.forEach { sourceResult ->
             val loggedAt = Instant.now()
             if (sourceResult.advanceCursor && sourceResult.cursorTo != null && sourceResult.cursorTo != sourceResult.cursorFrom) {
@@ -126,9 +127,9 @@ class ServiceEtlService(
                 )
             }
             val sliceNote = if (sourceResult.materializedInCurrentSlice) {
-                SLICE4_CORE_PROJECTION_NOTE
+                SLICE5_GAME_PROJECTION_NOTE
             } else {
-                SLICE4_DEFERRED_SOURCE_NOTE
+                SLICE5_DEFERRED_SOURCE_NOTE
             }
             serviceEtlJdbcRepository.insertSourceLog(
                 ServiceEtlSourceLogEntry(

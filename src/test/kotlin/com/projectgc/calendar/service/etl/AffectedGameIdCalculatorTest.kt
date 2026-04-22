@@ -14,6 +14,13 @@ import kotlin.test.assertTrue
 
 class AffectedGameIdCalculatorTest {
     companion object {
+        private val SLICE5_MATERIALIZED_SOURCE_TABLES = setOf(
+            "game",
+            "release_date",
+            "involved_company",
+            "language_support",
+            "game_localization",
+        )
         private val SLICE3_SOURCE_TABLES = listOf(
             "game",
             "release_date",
@@ -33,12 +40,15 @@ class AffectedGameIdCalculatorTest {
     private val calculator = AffectedGameIdCalculator(repository)
 
     @Test
-    fun `returns core projection diffs and keeps deferred slice3 sources in dry-run on initial execution`() {
+    fun `returns slice5 materialized diffs and keeps deferred slice6 sources in dry-run on initial execution`() {
         val allGameIds = listOf(11L, 22L, 33L)
         `when`(repository.findCursor(anyObject(String::class.java))).thenReturn(null)
         `when`(repository.findAllIngestGameIds()).thenReturn(allGameIds)
-        `when`(repository.findAffectedGameIdsFromCoreGameProjectionDiff()).thenReturn(allGameIds.toSet())
+        `when`(repository.findAffectedGameIdsFromCoreGameProjectionDiff()).thenReturn(linkedSetOf(11L, 22L))
+        `when`(repository.findAffectedGameIdsFromGameBridgeProjectionDiff()).thenReturn(linkedSetOf(22L, 33L))
         `when`(repository.findAffectedGameIdsFromGameReleaseProjectionDiff()).thenReturn(allGameIds.toSet())
+        `when`(repository.findAffectedGameIdsFromInvolvedCompanyProjectionDiff()).thenReturn(allGameIds.toSet())
+        `when`(repository.findAffectedGameIdsFromLanguageSupportProjectionDiff()).thenReturn(allGameIds.toSet())
         `when`(repository.findAffectedGameIdsFromGameLocalizationProjectionDiff()).thenReturn(allGameIds.toSet())
 
         val result = calculator.calculate(500L)
@@ -49,7 +59,7 @@ class AffectedGameIdCalculatorTest {
         assertNull(resultsByTable.getValue("game").cursorFrom)
         assertNull(resultsByTable.getValue("game").cursorTo)
         assertEquals(allGameIds.toSet(), resultsByTable.getValue("game").affectedGameIds)
-        assertTrue(resultsByTable.getValue("game").note.contains("core projection fields"))
+        assertTrue(resultsByTable.getValue("game").note.contains("core and bridge projections"))
         assertTrue(resultsByTable.getValue("game").materializedInCurrentSlice)
         assertFalse(resultsByTable.getValue("game").advanceCursor)
 
@@ -60,6 +70,20 @@ class AffectedGameIdCalculatorTest {
         assertTrue(resultsByTable.getValue("release_date").materializedInCurrentSlice)
         assertFalse(resultsByTable.getValue("release_date").advanceCursor)
 
+        assertNull(resultsByTable.getValue("involved_company").cursorFrom)
+        assertNull(resultsByTable.getValue("involved_company").cursorTo)
+        assertEquals(allGameIds.toSet(), resultsByTable.getValue("involved_company").affectedGameIds)
+        assertTrue(resultsByTable.getValue("involved_company").note.contains("service.game_company"))
+        assertTrue(resultsByTable.getValue("involved_company").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("involved_company").advanceCursor)
+
+        assertNull(resultsByTable.getValue("language_support").cursorFrom)
+        assertNull(resultsByTable.getValue("language_support").cursorTo)
+        assertEquals(allGameIds.toSet(), resultsByTable.getValue("language_support").affectedGameIds)
+        assertTrue(resultsByTable.getValue("language_support").note.contains("service.game_language"))
+        assertTrue(resultsByTable.getValue("language_support").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("language_support").advanceCursor)
+
         assertNull(resultsByTable.getValue("game_localization").cursorFrom)
         assertNull(resultsByTable.getValue("game_localization").cursorTo)
         assertEquals(allGameIds.toSet(), resultsByTable.getValue("game_localization").affectedGameIds)
@@ -68,7 +92,7 @@ class AffectedGameIdCalculatorTest {
         assertFalse(resultsByTable.getValue("game_localization").advanceCursor)
 
         SLICE3_SOURCE_TABLES
-            .filterNot { it in setOf("game", "release_date", "game_localization") }
+            .filterNot { it in SLICE5_MATERIALIZED_SOURCE_TABLES }
             .forEach { tableName ->
                 val sourceResult = resultsByTable.getValue(tableName)
                 assertNull(sourceResult.cursorFrom)
@@ -81,14 +105,20 @@ class AffectedGameIdCalculatorTest {
 
         verify(repository).findAllIngestGameIds()
         verify(repository).findAffectedGameIdsFromCoreGameProjectionDiff()
+        verify(repository).findAffectedGameIdsFromGameBridgeProjectionDiff()
         verify(repository).findAffectedGameIdsFromGameReleaseProjectionDiff()
+        verify(repository).findAffectedGameIdsFromInvolvedCompanyProjectionDiff()
+        verify(repository).findAffectedGameIdsFromLanguageSupportProjectionDiff()
         verify(repository).findAffectedGameIdsFromGameLocalizationProjectionDiff()
         verify(repository, never()).findCursor("game")
         verify(repository, never()).findCursor("release_date")
+        verify(repository, never()).findCursor("involved_company")
+        verify(repository, never()).findCursor("language_support")
         verify(repository, never()).findCursor("game_localization")
         verify(repository, never()).findAffectedGameIdsFromGames(anyLong())
         verify(repository, never()).findAffectedGameIdsFromReleaseDates(anyLong())
         verify(repository, never()).findAffectedGameIdsFromInvolvedCompanies(anyLong())
+        verify(repository, never()).findAffectedGameIdsFromLanguageSupports(anyLong())
         verify(repository, never()).findAffectedGameIdsFromGameUpdatedAt(anyLong())
     }
 
@@ -96,11 +126,6 @@ class AffectedGameIdCalculatorTest {
     fun `mixes source deltas with per-source full sweep when a cursor is missing`() {
         val allGameIds = listOf(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L)
         `when`(repository.findAllIngestGameIds()).thenReturn(allGameIds)
-        `when`(repository.findCursor("game")).thenReturn(10L)
-        `when`(repository.findCursor("release_date")).thenReturn(20L)
-        `when`(repository.findCursor("involved_company")).thenReturn(30L)
-        `when`(repository.findCursor("language_support")).thenReturn(40L)
-        `when`(repository.findCursor("game_localization")).thenReturn(50L)
         `when`(repository.findCursor("cover")).thenReturn(61L)
         `when`(repository.findCursor("artwork")).thenReturn(62L)
         `when`(repository.findCursor("screenshot")).thenReturn(63L)
@@ -108,9 +133,10 @@ class AffectedGameIdCalculatorTest {
         `when`(repository.findCursor("website")).thenReturn(null)
         `when`(repository.findCursor("alternative_name")).thenReturn(66L)
         `when`(repository.findAffectedGameIdsFromCoreGameProjectionDiff()).thenReturn(linkedSetOf(1L, 2L))
+        `when`(repository.findAffectedGameIdsFromGameBridgeProjectionDiff()).thenReturn(linkedSetOf(3L))
         `when`(repository.findAffectedGameIdsFromGameReleaseProjectionDiff()).thenReturn(linkedSetOf(2L, 3L))
-        `when`(repository.findAffectedGameIdsFromInvolvedCompanies(30L)).thenReturn(linkedSetOf(4L))
-        `when`(repository.findAffectedGameIdsFromLanguageSupports(40L)).thenReturn(linkedSetOf(5L))
+        `when`(repository.findAffectedGameIdsFromInvolvedCompanyProjectionDiff()).thenReturn(linkedSetOf(4L))
+        `when`(repository.findAffectedGameIdsFromLanguageSupportProjectionDiff()).thenReturn(linkedSetOf(5L))
         `when`(repository.findAffectedGameIdsFromGameLocalizationProjectionDiff()).thenReturn(linkedSetOf(6L))
         `when`(repository.findAffectedGameIdsFromGameUpdatedAt(61L)).thenReturn(linkedSetOf(7L))
         `when`(repository.findAffectedGameIdsFromGameUpdatedAt(62L)).thenReturn(linkedSetOf(8L))
@@ -121,8 +147,8 @@ class AffectedGameIdCalculatorTest {
         val result = calculator.calculate(700L)
         val resultsByTable = result.sourceResults.associateBy { it.tableName }
 
-        assertEquals(linkedSetOf(1L, 2L, 3L, 6L), result.affectedGameIds)
-        assertEquals(linkedSetOf(1L, 2L), resultsByTable.getValue("game").affectedGameIds)
+        assertEquals(linkedSetOf(1L, 2L, 3L, 4L, 5L, 6L), result.affectedGameIds)
+        assertEquals(linkedSetOf(1L, 2L, 3L), resultsByTable.getValue("game").affectedGameIds)
         assertEquals(linkedSetOf(2L, 3L), resultsByTable.getValue("release_date").affectedGameIds)
         assertEquals(linkedSetOf(4L), resultsByTable.getValue("involved_company").affectedGameIds)
         assertEquals(linkedSetOf(5L), resultsByTable.getValue("language_support").affectedGameIds)
@@ -141,25 +167,38 @@ class AffectedGameIdCalculatorTest {
         assertNull(resultsByTable.getValue("release_date").cursorTo)
         assertTrue(resultsByTable.getValue("release_date").materializedInCurrentSlice)
         assertFalse(resultsByTable.getValue("release_date").advanceCursor)
+        assertNull(resultsByTable.getValue("involved_company").cursorFrom)
+        assertNull(resultsByTable.getValue("involved_company").cursorTo)
+        assertTrue(resultsByTable.getValue("involved_company").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("involved_company").advanceCursor)
+        assertNull(resultsByTable.getValue("language_support").cursorFrom)
+        assertNull(resultsByTable.getValue("language_support").cursorTo)
+        assertTrue(resultsByTable.getValue("language_support").materializedInCurrentSlice)
+        assertFalse(resultsByTable.getValue("language_support").advanceCursor)
         assertEquals(null, resultsByTable.getValue("website").cursorFrom)
         assertEquals(700L, resultsByTable.getValue("website").cursorTo)
         assertFalse(resultsByTable.getValue("website").materializedInCurrentSlice)
         assertFalse(resultsByTable.getValue("website").advanceCursor)
-        assertTrue(resultsByTable.getValue("game").note.contains("core projection fields"))
+        assertTrue(resultsByTable.getValue("game").note.contains("core and bridge projections"))
         assertTrue(resultsByTable.getValue("cover").note.contains("ingest.game.updated_at"))
         assertTrue(resultsByTable.getValue("website").note.contains("initial full sweep"))
 
         verify(repository).findAllIngestGameIds()
         verify(repository).findAffectedGameIdsFromCoreGameProjectionDiff()
+        verify(repository).findAffectedGameIdsFromGameBridgeProjectionDiff()
         verify(repository).findAffectedGameIdsFromGameReleaseProjectionDiff()
-        verify(repository).findAffectedGameIdsFromInvolvedCompanies(30L)
-        verify(repository).findAffectedGameIdsFromLanguageSupports(40L)
+        verify(repository).findAffectedGameIdsFromInvolvedCompanyProjectionDiff()
+        verify(repository).findAffectedGameIdsFromLanguageSupportProjectionDiff()
         verify(repository).findAffectedGameIdsFromGameLocalizationProjectionDiff()
         verify(repository, never()).findCursor("game")
         verify(repository, never()).findCursor("release_date")
+        verify(repository, never()).findCursor("involved_company")
+        verify(repository, never()).findCursor("language_support")
         verify(repository, never()).findCursor("game_localization")
         verify(repository, never()).findAffectedGameIdsFromGames(anyLong())
         verify(repository, never()).findAffectedGameIdsFromReleaseDates(anyLong())
+        verify(repository, never()).findAffectedGameIdsFromInvolvedCompanies(anyLong())
+        verify(repository, never()).findAffectedGameIdsFromLanguageSupports(anyLong())
         verify(repository, never()).findAffectedGameIdsFromGameLocalizations(anyLong())
         verify(repository).findAffectedGameIdsFromGameUpdatedAt(61L)
         verify(repository).findAffectedGameIdsFromGameUpdatedAt(62L)

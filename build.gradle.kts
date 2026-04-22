@@ -34,6 +34,8 @@ dependencies {
 	testImplementation("org.springframework.boot:spring-boot-starter-test")
 	testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
 	testImplementation("com.tngtech.archunit:archunit-junit5:1.3.0")
+	testImplementation("org.testcontainers:junit-jupiter:1.21.3")
+	testImplementation("org.testcontainers:postgresql:1.21.3")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -49,7 +51,7 @@ allOpen {
 	annotation("jakarta.persistence.Embeddable")
 }
 
-tasks.withType<Test> {
+tasks.named<Test>("test") {
 	useJUnitPlatform {
 		excludeTags("integration")  // ./gradlew test 에서 통합 테스트 제외
 	}

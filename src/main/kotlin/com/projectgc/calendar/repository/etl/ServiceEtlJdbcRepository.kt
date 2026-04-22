@@ -129,6 +129,42 @@ class ServiceEtlJdbcRepository(
             """.trimIndent(),
         ) { rs, _ -> rs.getLong("id") }.toCollection(linkedSetOf())
 
+    fun findAffectedGameIdsFromGameBridgeProjectionDiff(): Set<Long> {
+        val affectedGameIds = linkedSetOf<Long>()
+        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
+            targetTable = "game_genre",
+            targetColumn = "genre_id",
+            sourceColumn = "genres",
+            dimensionTable = "genre",
+        )
+        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
+            targetTable = "game_theme",
+            targetColumn = "theme_id",
+            sourceColumn = "themes",
+            dimensionTable = "theme",
+        )
+        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
+            targetTable = "game_player_perspective",
+            targetColumn = "player_perspective_id",
+            sourceColumn = "player_perspectives",
+            dimensionTable = "player_perspective",
+        )
+        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
+            targetTable = "game_game_mode",
+            targetColumn = "game_mode_id",
+            sourceColumn = "game_modes",
+            dimensionTable = "game_mode",
+        )
+        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
+            targetTable = "game_keyword",
+            targetColumn = "keyword_id",
+            sourceColumn = "keywords",
+            dimensionTable = "keyword",
+        )
+        affectedGameIds += findAffectedGameIdsFromGameRelationProjectionDiff()
+        return affectedGameIds
+    }
+
     fun findAffectedGameIdsFromGameReleaseProjectionDiff(): Set<Long> =
         jdbc.query(
             """
@@ -188,8 +224,109 @@ class ServiceEtlJdbcRepository(
     fun findAffectedGameIdsFromInvolvedCompanies(cursorFrom: Long): Set<Long> =
         findDistinctGameIdsByUpdatedAt("involved_company", cursorFrom)
 
+    fun findAffectedGameIdsFromInvolvedCompanyProjectionDiff(): Set<Long> =
+        jdbc.query(
+            """
+            WITH source_rows AS (
+                SELECT
+                    ic.game AS game_id,
+                    ic.company AS company_id,
+                    bool_or(COALESCE(ic.developer, FALSE)) AS is_developer,
+                    bool_or(COALESCE(ic.publisher, FALSE)) AS is_publisher,
+                    bool_or(COALESCE(ic.porting, FALSE)) AS is_porting,
+                    bool_or(COALESCE(ic.supporting, FALSE)) AS is_supporting
+                FROM ingest.involved_company ic
+                JOIN service.game sg ON sg.id = ic.game
+                JOIN service.company sc ON sc.id = ic.company
+                WHERE ic.game IS NOT NULL
+                  AND ic.company IS NOT NULL
+                GROUP BY ic.game, ic.company
+                HAVING bool_or(COALESCE(ic.developer, FALSE))
+                    OR bool_or(COALESCE(ic.publisher, FALSE))
+                    OR bool_or(COALESCE(ic.porting, FALSE))
+                    OR bool_or(COALESCE(ic.supporting, FALSE))
+            )
+            SELECT DISTINCT game_id
+            FROM (
+                SELECT src.game_id
+                FROM source_rows src
+                LEFT JOIN service.game_company s
+                  ON s.game_id = src.game_id
+                 AND s.company_id = src.company_id
+                WHERE s.game_id IS NULL
+                   OR ${differenceCondition("s.is_developer", "src.is_developer")}
+                   OR ${differenceCondition("s.is_publisher", "src.is_publisher")}
+                   OR ${differenceCondition("s.is_porting", "src.is_porting")}
+                   OR ${differenceCondition("s.is_supporting", "src.is_supporting")}
+                UNION
+                SELECT s.game_id
+                FROM service.game_company s
+                JOIN ingest.game g ON g.id = s.game_id
+                LEFT JOIN source_rows src
+                  ON src.game_id = s.game_id
+                 AND src.company_id = s.company_id
+                WHERE src.game_id IS NULL
+                   OR ${differenceCondition("s.is_developer", "src.is_developer")}
+                   OR ${differenceCondition("s.is_publisher", "src.is_publisher")}
+                   OR ${differenceCondition("s.is_porting", "src.is_porting")}
+                   OR ${differenceCondition("s.is_supporting", "src.is_supporting")}
+            ) affected
+            ORDER BY game_id
+            """.trimIndent(),
+        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+
     fun findAffectedGameIdsFromLanguageSupports(cursorFrom: Long): Set<Long> =
         findDistinctGameIdsByUpdatedAt("language_support", cursorFrom)
+
+    fun findAffectedGameIdsFromLanguageSupportProjectionDiff(): Set<Long> =
+        jdbc.query(
+            """
+            WITH grouped_rows AS (
+                SELECT
+                    ls.game AS game_id,
+                    ls.language AS language_id,
+                    bool_or(lower(COALESCE(lst.name, '')) = 'audio') AS supports_audio,
+                    bool_or(lower(COALESCE(lst.name, '')) IN ('subtitles', 'subtitle')) AS supports_subtitles,
+                    bool_or(lower(COALESCE(lst.name, '')) = 'interface') AS supports_interface
+                FROM ingest.language_support ls
+                JOIN service.game sg ON sg.id = ls.game
+                JOIN service.language sl ON sl.id = ls.language
+                LEFT JOIN ingest.language_support_type lst ON lst.id = ls.language_support_type
+                WHERE ls.game IS NOT NULL
+                  AND ls.language IS NOT NULL
+                GROUP BY ls.game, ls.language
+            ),
+            source_rows AS (
+                SELECT *
+                FROM grouped_rows
+                WHERE supports_audio OR supports_subtitles OR supports_interface
+            )
+            SELECT DISTINCT game_id
+            FROM (
+                SELECT src.game_id
+                FROM source_rows src
+                LEFT JOIN service.game_language s
+                  ON s.game_id = src.game_id
+                 AND s.language_id = src.language_id
+                WHERE s.game_id IS NULL
+                   OR ${differenceCondition("s.supports_audio", "src.supports_audio")}
+                   OR ${differenceCondition("s.supports_subtitles", "src.supports_subtitles")}
+                   OR ${differenceCondition("s.supports_interface", "src.supports_interface")}
+                UNION
+                SELECT s.game_id
+                FROM service.game_language s
+                JOIN ingest.game g ON g.id = s.game_id
+                LEFT JOIN source_rows src
+                  ON src.game_id = s.game_id
+                 AND src.language_id = s.language_id
+                WHERE src.game_id IS NULL
+                   OR ${differenceCondition("s.supports_audio", "src.supports_audio")}
+                   OR ${differenceCondition("s.supports_subtitles", "src.supports_subtitles")}
+                   OR ${differenceCondition("s.supports_interface", "src.supports_interface")}
+            ) affected
+            ORDER BY game_id
+            """.trimIndent(),
+        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
 
     fun findAffectedGameIdsFromGameLocalizationProjectionDiff(): Set<Long> =
         jdbc.query(
@@ -315,6 +452,116 @@ class ServiceEtlJdbcRepository(
             setNullableInt(7, row.year)
             setNullableInt(8, row.month)
             setNullableString(9, row.dateHuman)
+        }
+    }
+
+    fun rebuildGameDependentBridgeProjections(affectedGameIds: Set<Long>) {
+        val materializedGameIds = loadExistingIngestGameIds(affectedGameIds)
+        if (materializedGameIds.isEmpty()) {
+            return
+        }
+
+        val availableGameIds = loadIdSet("service.game")
+
+        deleteByGameIds("service.game_language", materializedGameIds)
+        val gameLanguageRows = resolveGameLanguageReferences(
+            rows = loadGameLanguageProjectionRows(materializedGameIds),
+            availableGameIds = availableGameIds,
+            availableLanguageIds = loadIdSet("service.language"),
+        )
+        batchUpsert(
+            """
+            INSERT INTO service.game_language
+                (game_id, language_id, supports_audio, supports_subtitles, supports_interface)
+            VALUES (?, ?, ?, ?, ?)
+            """.trimIndent(),
+            gameLanguageRows,
+        ) { row ->
+            setLong(1, row.gameId)
+            setLong(2, row.languageId)
+            setBoolean(3, row.supportsAudio)
+            setBoolean(4, row.supportsSubtitles)
+            setBoolean(5, row.supportsInterface)
+        }
+
+        rebuildGameArrayBridgeProjection(
+            tableName = "service.game_genre",
+            materializedGameIds = materializedGameIds,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIdSet("service.genre"),
+            sourceColumn = "genres",
+            targetColumn = "genre_id",
+        )
+        rebuildGameArrayBridgeProjection(
+            tableName = "service.game_theme",
+            materializedGameIds = materializedGameIds,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIdSet("service.theme"),
+            sourceColumn = "themes",
+            targetColumn = "theme_id",
+        )
+        rebuildGameArrayBridgeProjection(
+            tableName = "service.game_player_perspective",
+            materializedGameIds = materializedGameIds,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIdSet("service.player_perspective"),
+            sourceColumn = "player_perspectives",
+            targetColumn = "player_perspective_id",
+        )
+        rebuildGameArrayBridgeProjection(
+            tableName = "service.game_game_mode",
+            materializedGameIds = materializedGameIds,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIdSet("service.game_mode"),
+            sourceColumn = "game_modes",
+            targetColumn = "game_mode_id",
+        )
+        rebuildGameArrayBridgeProjection(
+            tableName = "service.game_keyword",
+            materializedGameIds = materializedGameIds,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIdSet("service.keyword"),
+            sourceColumn = "keywords",
+            targetColumn = "keyword_id",
+        )
+
+        deleteByGameIds("service.game_company", materializedGameIds)
+        val gameCompanyRows = resolveGameCompanyReferences(
+            rows = loadGameCompanyProjectionRows(materializedGameIds),
+            availableGameIds = availableGameIds,
+            availableCompanyIds = loadIdSet("service.company"),
+        )
+        batchUpsert(
+            """
+            INSERT INTO service.game_company
+                (game_id, company_id, is_developer, is_publisher, is_porting, is_supporting)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            gameCompanyRows,
+        ) { row ->
+            setLong(1, row.gameId)
+            setLong(2, row.companyId)
+            setBoolean(3, row.isDeveloper)
+            setBoolean(4, row.isPublisher)
+            setBoolean(5, row.isPorting)
+            setBoolean(6, row.isSupporting)
+        }
+
+        deleteByGameIds("service.game_relation", materializedGameIds)
+        val gameRelationRows = resolveGameRelationReferences(
+            rows = loadGameRelationProjectionRows(materializedGameIds),
+            availableGameIds = availableGameIds,
+        )
+        batchUpsert(
+            """
+            INSERT INTO service.game_relation (game_id, related_game_id, relation_type)
+            VALUES (?, ?, ?)
+            """.trimIndent(),
+            gameRelationRows,
+        ) { row ->
+            setLong(1, row.gameId)
+            setLong(2, row.relatedGameId)
+            setString(3, row.relationType)
         }
     }
 
@@ -769,6 +1016,173 @@ class ServiceEtlJdbcRepository(
             },
         )
 
+    private fun loadExistingIngestGameIds(gameIds: Set<Long>): Set<Long> =
+        queryByLongIdChunks(
+            ids = gameIds,
+            sqlBuilder = { placeholders ->
+                """
+                SELECT id
+                FROM ingest.game
+                WHERE id IN ($placeholders)
+                ORDER BY id
+                """.trimIndent()
+            },
+            rowMapper = { rs, _ -> rs.getLong("id") },
+        ).toCollection(linkedSetOf())
+
+    private fun loadGameLanguageProjectionRows(gameIds: Set<Long>): List<GameLanguageProjectionRow> =
+        queryByLongIdChunks(
+            ids = gameIds,
+            sqlBuilder = { placeholders ->
+                """
+                SELECT
+                    ls.game AS game_id,
+                    ls.language AS language_id,
+                    bool_or(lower(COALESCE(lst.name, '')) = 'audio') AS supports_audio,
+                    bool_or(lower(COALESCE(lst.name, '')) IN ('subtitles', 'subtitle')) AS supports_subtitles,
+                    bool_or(lower(COALESCE(lst.name, '')) = 'interface') AS supports_interface
+                FROM ingest.language_support ls
+                LEFT JOIN ingest.language_support_type lst ON lst.id = ls.language_support_type
+                WHERE ls.game IN ($placeholders)
+                  AND ls.language IS NOT NULL
+                GROUP BY ls.game, ls.language
+                HAVING bool_or(lower(COALESCE(lst.name, '')) = 'audio')
+                    OR bool_or(lower(COALESCE(lst.name, '')) IN ('subtitles', 'subtitle'))
+                    OR bool_or(lower(COALESCE(lst.name, '')) = 'interface')
+                ORDER BY ls.game, ls.language
+                """.trimIndent()
+            },
+            rowMapper = { rs, _ ->
+                GameLanguageProjectionRow(
+                    gameId = rs.getLong("game_id"),
+                    languageId = rs.getLong("language_id"),
+                    supportsAudio = rs.getBoolean("supports_audio"),
+                    supportsSubtitles = rs.getBoolean("supports_subtitles"),
+                    supportsInterface = rs.getBoolean("supports_interface"),
+                )
+            },
+        )
+
+    private fun loadGameArrayProjectionRows(
+        gameIds: Set<Long>,
+        sourceColumn: String,
+    ): List<GameDimensionProjectionRow> =
+        queryByLongIdChunks(
+            ids = gameIds,
+            sqlBuilder = { placeholders ->
+                """
+                WITH filtered_games AS (
+                    SELECT id, $sourceColumn
+                    FROM ingest.game
+                    WHERE id IN ($placeholders)
+                )
+                SELECT DISTINCT game_id, dimension_id
+                FROM (
+                    SELECT fg.id AS game_id, ref.dimension_id
+                    FROM filtered_games fg
+                    CROSS JOIN LATERAL unnest(COALESCE(fg.$sourceColumn, ARRAY[]::BIGINT[])) AS ref(dimension_id)
+                ) rows
+                ORDER BY game_id, dimension_id
+                """.trimIndent()
+            },
+            rowMapper = { rs, _ ->
+                GameDimensionProjectionRow(
+                    gameId = rs.getLong("game_id"),
+                    dimensionId = rs.getLong("dimension_id"),
+                )
+            },
+        )
+
+    private fun loadGameCompanyProjectionRows(gameIds: Set<Long>): List<GameCompanyProjectionRow> =
+        queryByLongIdChunks(
+            ids = gameIds,
+            sqlBuilder = { placeholders ->
+                """
+                SELECT
+                    ic.game AS game_id,
+                    ic.company AS company_id,
+                    bool_or(COALESCE(ic.developer, FALSE)) AS is_developer,
+                    bool_or(COALESCE(ic.publisher, FALSE)) AS is_publisher,
+                    bool_or(COALESCE(ic.porting, FALSE)) AS is_porting,
+                    bool_or(COALESCE(ic.supporting, FALSE)) AS is_supporting
+                FROM ingest.involved_company ic
+                WHERE ic.game IN ($placeholders)
+                  AND ic.company IS NOT NULL
+                GROUP BY ic.game, ic.company
+                HAVING bool_or(COALESCE(ic.developer, FALSE))
+                    OR bool_or(COALESCE(ic.publisher, FALSE))
+                    OR bool_or(COALESCE(ic.porting, FALSE))
+                    OR bool_or(COALESCE(ic.supporting, FALSE))
+                ORDER BY ic.game, ic.company
+                """.trimIndent()
+            },
+            rowMapper = { rs, _ ->
+                GameCompanyProjectionRow(
+                    gameId = rs.getLong("game_id"),
+                    companyId = rs.getLong("company_id"),
+                    isDeveloper = rs.getBoolean("is_developer"),
+                    isPublisher = rs.getBoolean("is_publisher"),
+                    isPorting = rs.getBoolean("is_porting"),
+                    isSupporting = rs.getBoolean("is_supporting"),
+                )
+            },
+        )
+
+    private fun loadGameRelationProjectionRows(gameIds: Set<Long>): List<GameRelationProjectionRow> =
+        queryByLongIdChunks(
+            ids = gameIds,
+            sqlBuilder = { placeholders ->
+                """
+                WITH filtered_games AS (
+                    SELECT
+                        id,
+                        parent_game,
+                        remakes,
+                        remasters,
+                        ports,
+                        standalone_expansions,
+                        similar_games
+                    FROM ingest.game
+                    WHERE id IN ($placeholders)
+                )
+                SELECT game_id, related_game_id, relation_type
+                FROM (
+                    SELECT id AS game_id, parent_game AS related_game_id, 'PARENT' AS relation_type
+                    FROM filtered_games
+                    WHERE parent_game IS NOT NULL
+                    UNION
+                    SELECT fg.id AS game_id, rel.related_game_id, 'REMAKE' AS relation_type
+                    FROM filtered_games fg
+                    CROSS JOIN LATERAL unnest(COALESCE(fg.remakes, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                    UNION
+                    SELECT fg.id AS game_id, rel.related_game_id, 'REMASTER' AS relation_type
+                    FROM filtered_games fg
+                    CROSS JOIN LATERAL unnest(COALESCE(fg.remasters, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                    UNION
+                    SELECT fg.id AS game_id, rel.related_game_id, 'PORT' AS relation_type
+                    FROM filtered_games fg
+                    CROSS JOIN LATERAL unnest(COALESCE(fg.ports, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                    UNION
+                    SELECT fg.id AS game_id, rel.related_game_id, 'STANDALONE_EXPANSION' AS relation_type
+                    FROM filtered_games fg
+                    CROSS JOIN LATERAL unnest(COALESCE(fg.standalone_expansions, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                    UNION
+                    SELECT fg.id AS game_id, rel.related_game_id, 'SIMILAR' AS relation_type
+                    FROM filtered_games fg
+                    CROSS JOIN LATERAL unnest(COALESCE(fg.similar_games, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                ) rows
+                ORDER BY game_id, relation_type, related_game_id
+                """.trimIndent()
+            },
+            rowMapper = { rs, _ ->
+                GameRelationProjectionRow(
+                    gameId = rs.getLong("game_id"),
+                    relatedGameId = rs.getLong("related_game_id"),
+                    relationType = rs.getString("relation_type"),
+                )
+            },
+        )
+
     private fun findDistinctGameIdsByUpdatedAt(tableName: String, cursorFrom: Long): Set<Long> =
         jdbc.query(
             """
@@ -785,6 +1199,99 @@ class ServiceEtlJdbcRepository(
     private fun loadIdSet(tableName: String): Set<Long> =
         jdbc.query("SELECT id FROM $tableName") { rs, _ -> rs.getLong("id") }.toSet()
 
+    private fun findAffectedGameIdsFromGameArrayProjectionDiff(
+        targetTable: String,
+        targetColumn: String,
+        sourceColumn: String,
+        dimensionTable: String,
+    ): Set<Long> =
+        jdbc.query(
+            """
+            WITH source_rows AS (
+                SELECT DISTINCT i.id AS game_id, ref.dimension_id
+                FROM ingest.game i
+                JOIN service.game sg ON sg.id = i.id
+                CROSS JOIN LATERAL unnest(COALESCE(i.$sourceColumn, ARRAY[]::BIGINT[])) AS ref(dimension_id)
+                JOIN service.$dimensionTable d ON d.id = ref.dimension_id
+            )
+            SELECT DISTINCT game_id
+            FROM (
+                SELECT src.game_id
+                FROM source_rows src
+                LEFT JOIN service.$targetTable s
+                  ON s.game_id = src.game_id
+                 AND s.$targetColumn = src.dimension_id
+                WHERE s.game_id IS NULL
+                UNION
+                SELECT s.game_id
+                FROM service.$targetTable s
+                JOIN ingest.game g ON g.id = s.game_id
+                LEFT JOIN source_rows src
+                  ON src.game_id = s.game_id
+                 AND src.dimension_id = s.$targetColumn
+                WHERE src.game_id IS NULL
+            ) affected
+            ORDER BY game_id
+            """.trimIndent(),
+        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+
+    internal fun findAffectedGameIdsFromGameRelationProjectionDiff(): Set<Long> =
+        jdbc.query(
+            """
+            WITH source_rows AS (
+                SELECT i.id AS game_id, i.parent_game AS related_game_id, 'PARENT' AS relation_type
+                FROM ingest.game i
+                JOIN ingest.game rg ON rg.id = i.parent_game
+                WHERE i.parent_game IS NOT NULL
+                UNION
+                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'REMAKE' AS relation_type
+                FROM ingest.game i
+                CROSS JOIN LATERAL unnest(COALESCE(i.remakes, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                JOIN ingest.game rg ON rg.id = rel.related_game_id
+                UNION
+                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'REMASTER' AS relation_type
+                FROM ingest.game i
+                CROSS JOIN LATERAL unnest(COALESCE(i.remasters, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                JOIN ingest.game rg ON rg.id = rel.related_game_id
+                UNION
+                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'PORT' AS relation_type
+                FROM ingest.game i
+                CROSS JOIN LATERAL unnest(COALESCE(i.ports, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                JOIN ingest.game rg ON rg.id = rel.related_game_id
+                UNION
+                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'STANDALONE_EXPANSION' AS relation_type
+                FROM ingest.game i
+                CROSS JOIN LATERAL unnest(COALESCE(i.standalone_expansions, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                JOIN ingest.game rg ON rg.id = rel.related_game_id
+                UNION
+                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'SIMILAR' AS relation_type
+                FROM ingest.game i
+                CROSS JOIN LATERAL unnest(COALESCE(i.similar_games, ARRAY[]::BIGINT[])) AS rel(related_game_id)
+                JOIN ingest.game rg ON rg.id = rel.related_game_id
+            )
+            SELECT DISTINCT game_id
+            FROM (
+                SELECT src.game_id
+                FROM source_rows src
+                LEFT JOIN service.game_relation s
+                  ON s.game_id = src.game_id
+                 AND s.related_game_id = src.related_game_id
+                 AND s.relation_type = src.relation_type
+                WHERE s.game_id IS NULL
+                UNION
+                SELECT s.game_id
+                FROM service.game_relation s
+                JOIN ingest.game g ON g.id = s.game_id
+                LEFT JOIN source_rows src
+                  ON src.game_id = s.game_id
+                 AND src.related_game_id = s.related_game_id
+                 AND src.relation_type = s.relation_type
+                WHERE src.game_id IS NULL
+            ) affected
+            ORDER BY game_id
+            """.trimIndent(),
+        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+
     private fun deleteByGameIds(tableName: String, gameIds: Set<Long>) {
         if (gameIds.isEmpty()) {
             return
@@ -795,6 +1302,32 @@ class ServiceEtlJdbcRepository(
                 "DELETE FROM $tableName WHERE game_id IN ($placeholders)",
                 *chunk.toTypedArray(),
             )
+        }
+    }
+
+    private fun rebuildGameArrayBridgeProjection(
+        tableName: String,
+        materializedGameIds: Set<Long>,
+        availableGameIds: Set<Long>,
+        availableDimensionIds: Set<Long>,
+        sourceColumn: String,
+        targetColumn: String,
+    ) {
+        deleteByGameIds(tableName, materializedGameIds)
+        val rows = resolveGameDimensionReferences(
+            rows = loadGameArrayProjectionRows(materializedGameIds, sourceColumn),
+            availableGameIds = availableGameIds,
+            availableDimensionIds = availableDimensionIds,
+        )
+        batchUpsert(
+            """
+            INSERT INTO $tableName (game_id, $targetColumn)
+            VALUES (?, ?)
+            """.trimIndent(),
+            rows,
+        ) { row ->
+            setLong(1, row.gameId)
+            setLong(2, row.dimensionId)
         }
     }
 
@@ -973,6 +1506,34 @@ internal data class GameReleaseProjectionRow(
     val dateHuman: String?,
 )
 
+internal data class GameLanguageProjectionRow(
+    val gameId: Long,
+    val languageId: Long,
+    val supportsAudio: Boolean,
+    val supportsSubtitles: Boolean,
+    val supportsInterface: Boolean,
+)
+
+internal data class GameDimensionProjectionRow(
+    val gameId: Long,
+    val dimensionId: Long,
+)
+
+internal data class GameCompanyProjectionRow(
+    val gameId: Long,
+    val companyId: Long,
+    val isDeveloper: Boolean,
+    val isPublisher: Boolean,
+    val isPorting: Boolean,
+    val isSupporting: Boolean,
+)
+
+internal data class GameRelationProjectionRow(
+    val gameId: Long,
+    val relatedGameId: Long,
+    val relationType: String,
+)
+
 internal data class PlatformSyncRow(
     val id: Long,
     val name: String?,
@@ -1033,6 +1594,45 @@ internal fun resolveGameReleaseReferences(
         regionId = row.regionId?.takeIf { it in availableRegionIds },
         statusId = row.statusId?.takeIf { it in availableStatusIds },
     )
+}
+
+internal fun resolveGameLanguageReferences(
+    rows: List<GameLanguageProjectionRow>,
+    availableGameIds: Set<Long>,
+    availableLanguageIds: Set<Long>,
+): List<GameLanguageProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf {
+        it.gameId in availableGameIds &&
+            it.languageId in availableLanguageIds &&
+            (it.supportsAudio || it.supportsSubtitles || it.supportsInterface)
+    }
+}
+
+internal fun resolveGameDimensionReferences(
+    rows: List<GameDimensionProjectionRow>,
+    availableGameIds: Set<Long>,
+    availableDimensionIds: Set<Long>,
+): List<GameDimensionProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds && it.dimensionId in availableDimensionIds }
+}
+
+internal fun resolveGameCompanyReferences(
+    rows: List<GameCompanyProjectionRow>,
+    availableGameIds: Set<Long>,
+    availableCompanyIds: Set<Long>,
+): List<GameCompanyProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf {
+        it.gameId in availableGameIds &&
+            it.companyId in availableCompanyIds &&
+            (it.isDeveloper || it.isPublisher || it.isPorting || it.isSupporting)
+    }
+}
+
+internal fun resolveGameRelationReferences(
+    rows: List<GameRelationProjectionRow>,
+    availableGameIds: Set<Long>,
+): List<GameRelationProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds && it.relatedGameId in availableGameIds }
 }
 
 internal fun resolveCompanyReferences(rows: List<CompanySyncRow>): List<CompanySyncRow> {

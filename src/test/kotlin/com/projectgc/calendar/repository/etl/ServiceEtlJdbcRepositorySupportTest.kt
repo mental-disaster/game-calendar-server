@@ -197,4 +197,149 @@ class ServiceEtlJdbcRepositorySupportTest {
             ),
         )
     }
+
+    @Test
+    fun `resolveGameLanguageReferences drops unresolved rows and rows without supported flags`() {
+        val rows = listOf(
+            GameLanguageProjectionRow(
+                gameId = 1L,
+                languageId = 10L,
+                supportsAudio = true,
+                supportsSubtitles = false,
+                supportsInterface = false,
+            ),
+            GameLanguageProjectionRow(
+                gameId = 1L,
+                languageId = 11L,
+                supportsAudio = false,
+                supportsSubtitles = false,
+                supportsInterface = false,
+            ),
+            GameLanguageProjectionRow(
+                gameId = 99L,
+                languageId = 10L,
+                supportsAudio = true,
+                supportsSubtitles = false,
+                supportsInterface = false,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                GameLanguageProjectionRow(
+                    gameId = 1L,
+                    languageId = 10L,
+                    supportsAudio = true,
+                    supportsSubtitles = false,
+                    supportsInterface = false,
+                ),
+            ),
+            resolveGameLanguageReferences(
+                rows = rows,
+                availableGameIds = setOf(1L),
+                availableLanguageIds = setOf(10L),
+            ),
+        )
+    }
+
+    @Test
+    fun `resolveGameDimensionReferences drops unresolved game and dimension ids`() {
+        val rows = listOf(
+            GameDimensionProjectionRow(gameId = 1L, dimensionId = 10L),
+            GameDimensionProjectionRow(gameId = 1L, dimensionId = 11L),
+            GameDimensionProjectionRow(gameId = 2L, dimensionId = 10L),
+        )
+
+        assertEquals(
+            listOf(GameDimensionProjectionRow(gameId = 1L, dimensionId = 10L)),
+            resolveGameDimensionReferences(
+                rows = rows,
+                availableGameIds = setOf(1L),
+                availableDimensionIds = setOf(10L),
+            ),
+        )
+    }
+
+    @Test
+    fun `resolveGameCompanyReferences drops unresolved rows and rows without active roles`() {
+        val rows = listOf(
+            GameCompanyProjectionRow(
+                gameId = 1L,
+                companyId = 10L,
+                isDeveloper = true,
+                isPublisher = false,
+                isPorting = false,
+                isSupporting = false,
+            ),
+            GameCompanyProjectionRow(
+                gameId = 1L,
+                companyId = 11L,
+                isDeveloper = false,
+                isPublisher = false,
+                isPorting = false,
+                isSupporting = false,
+            ),
+            GameCompanyProjectionRow(
+                gameId = 2L,
+                companyId = 10L,
+                isDeveloper = true,
+                isPublisher = false,
+                isPorting = false,
+                isSupporting = false,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                GameCompanyProjectionRow(
+                    gameId = 1L,
+                    companyId = 10L,
+                    isDeveloper = true,
+                    isPublisher = false,
+                    isPorting = false,
+                    isSupporting = false,
+                ),
+            ),
+            resolveGameCompanyReferences(
+                rows = rows,
+                availableGameIds = setOf(1L),
+                availableCompanyIds = setOf(10L),
+            ),
+        )
+    }
+
+    @Test
+    fun `resolveGameRelationReferences drops rows with missing source or related game`() {
+        val rows = listOf(
+            GameRelationProjectionRow(
+                gameId = 1L,
+                relatedGameId = 2L,
+                relationType = "SIMILAR",
+            ),
+            GameRelationProjectionRow(
+                gameId = 1L,
+                relatedGameId = 99L,
+                relationType = "PORT",
+            ),
+            GameRelationProjectionRow(
+                gameId = 99L,
+                relatedGameId = 2L,
+                relationType = "REMAKE",
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                GameRelationProjectionRow(
+                    gameId = 1L,
+                    relatedGameId = 2L,
+                    relationType = "SIMILAR",
+                ),
+            ),
+            resolveGameRelationReferences(
+                rows = rows,
+                availableGameIds = setOf(1L, 2L),
+            ),
+        )
+    }
 }
