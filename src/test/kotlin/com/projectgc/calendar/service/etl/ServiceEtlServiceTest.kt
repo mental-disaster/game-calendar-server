@@ -1,14 +1,20 @@
 package com.projectgc.calendar.service.etl
 
+import com.projectgc.calendar.repository.etl.AlternativeNameProjectionRow
+import com.projectgc.calendar.repository.etl.ArtworkProjectionRow
+import com.projectgc.calendar.repository.etl.CoverProjectionRow
 import com.projectgc.calendar.repository.etl.GameCompanyProjectionRow
+import com.projectgc.calendar.repository.etl.GameVideoProjectionRow
 import com.projectgc.calendar.repository.etl.GameLocalizationProjectionRow
 import com.projectgc.calendar.repository.etl.GameProjectionRow
 import com.projectgc.calendar.repository.etl.GameReleaseProjectionRow
 import com.projectgc.calendar.repository.etl.IngestEtlReadJdbcRepository
 import com.projectgc.calendar.repository.etl.NamedDimensionRow
+import com.projectgc.calendar.repository.etl.ScreenshotProjectionRow
 import com.projectgc.calendar.repository.etl.ServiceEtlJdbcRepository
 import com.projectgc.calendar.repository.etl.ServiceEtlSourceLogEntry
 import com.projectgc.calendar.repository.etl.ServiceEtlTableSyncResult
+import com.projectgc.calendar.repository.etl.WebsiteProjectionRow
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.anyLong
@@ -34,15 +40,7 @@ import kotlin.test.assertTrue
 
 class ServiceEtlServiceTest {
     companion object {
-        private const val SLICE3_CURSOR_TO = 500L
-        private val SLICE5_MATERIALIZED_SOURCE_TABLES = setOf(
-            "game",
-            "release_date",
-            "involved_company",
-            "language_support",
-            "game_localization",
-        )
-        private val SLICE3_SOURCE_TABLES = listOf(
+        private val SLICE6_SOURCE_TABLES = listOf(
             "game",
             "release_date",
             "involved_company",
@@ -74,7 +72,7 @@ class ServiceEtlServiceTest {
         `when`(repository.findCursor(anyObject(String::class.java))).thenReturn(null)
         `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
         `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java)))
-            .thenReturn(emptySlice3CalculationResult())
+            .thenReturn(emptySlice6CalculationResult())
         doAnswer { invocation ->
             sourceLogs += invocation.arguments[0] as ServiceEtlSourceLogEntry
             null
@@ -101,7 +99,7 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `syncs prepared slice2 sources and rebuilds slice5 game projections without advancing deferred slice6 cursors`() {
+    fun `syncs prepared slice2 sources and rebuilds slice6 projections for all affected sources`() {
         `when`(repository.syncGameStatuses(anyList()))
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 2, nextCursor = null))
         `when`(repository.syncPlatformLogos(anyList()))
@@ -118,22 +116,18 @@ class ServiceEtlServiceTest {
             preparedAffectedGameInputs(gameIds = linkedSetOf(101L, 102L, 103L, 104L, 105L, 106L))
         )
         `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
-            slice3CalculationResult(
+            slice6CalculationResult(
                 perTableGameIds = mapOf(
                     "game" to setOf(101L, 102L, 103L),
                     "release_date" to setOf(103L, 104L),
                     "involved_company" to setOf(105L),
                     "language_support" to setOf(106L),
                     "cover" to setOf(101L, 107L),
-                ),
-                cursorFromByTable = mapOf(
-                    "involved_company" to 130L,
-                    "language_support" to 135L,
-                    "cover" to 140L,
+                    "website" to setOf(102L),
                 ),
                 noteByTable = mapOf(
-                    "game" to "slice5 projection diff",
-                    "cover" to "slice5 game updated_at delta",
+                    "game" to "slice6 projection diff",
+                    "cover" to "slice6 cover projection diff",
                 ),
             )
         )
@@ -151,6 +145,15 @@ class ServiceEtlServiceTest {
             anyLongSet(),
             anyList(),
             anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
+        verify(repository).rebuildGameMediaProjections(
+            anyLongSet(),
             anyList(),
             anyList(),
             anyList(),
@@ -181,7 +184,7 @@ class ServiceEtlServiceTest {
         assertNull(gameLog.cursorFrom)
         assertNull(gameLog.cursorTo)
         assertNotNull(gameLog.note)
-        assertTrue(gameLog.note!!.contains("slice5 projections rebuilt"))
+        assertTrue(gameLog.note!!.contains("slice6 projections rebuilt"))
         assertTrue(!gameLog.note!!.contains("dry-run"))
 
         val releaseDateLog = logsByTable.getValue("release_date")
@@ -189,31 +192,24 @@ class ServiceEtlServiceTest {
         assertEquals(2, releaseDateLog.processedRows)
         assertNull(releaseDateLog.cursorFrom)
         assertNull(releaseDateLog.cursorTo)
-        assertTrue(releaseDateLog.note!!.contains("slice5 projections rebuilt"))
-
-        val involvedCompanyLog = logsByTable.getValue("involved_company")
-        assertEquals("completed", involvedCompanyLog.status)
-        assertEquals(1, involvedCompanyLog.processedRows)
-        assertNull(involvedCompanyLog.cursorFrom)
-        assertNull(involvedCompanyLog.cursorTo)
-        assertTrue(involvedCompanyLog.note!!.contains("slice5 projections rebuilt"))
-
-        val languageSupportLog = logsByTable.getValue("language_support")
-        assertEquals("completed", languageSupportLog.status)
-        assertEquals(1, languageSupportLog.processedRows)
-        assertNull(languageSupportLog.cursorFrom)
-        assertNull(languageSupportLog.cursorTo)
-        assertTrue(languageSupportLog.note!!.contains("slice5 projections rebuilt"))
+        assertTrue(releaseDateLog.note!!.contains("slice6 projections rebuilt"))
 
         val coverLog = logsByTable.getValue("cover")
         assertEquals("completed", coverLog.status)
         assertEquals(2, coverLog.processedRows)
-        assertEquals(140L, coverLog.cursorFrom)
-        assertEquals(SLICE3_CURSOR_TO, coverLog.cursorTo)
-        assertTrue(coverLog.note!!.contains("deferred source dry-run"))
-        assertTrue(!coverLog.note!!.contains("slice5 projections rebuilt"))
+        assertNull(coverLog.cursorFrom)
+        assertNull(coverLog.cursorTo)
+        assertTrue(coverLog.note!!.contains("slice6 projections rebuilt"))
+
+        val websiteLog = logsByTable.getValue("website")
+        assertEquals("completed", websiteLog.status)
+        assertEquals(1, websiteLog.processedRows)
+        assertNull(websiteLog.cursorFrom)
+        assertNull(websiteLog.cursorTo)
+        assertTrue(websiteLog.note!!.contains("slice6 projections rebuilt"))
 
         assertTrue(sourceLogs.none { it.status == "skipped" })
+        assertTrue(sourceLogs.none { it.note?.contains("dry-run") == true })
         assertEquals(emptyList(), cursorWrites)
         assertEquals(listOf("completed"), finishedStatuses)
     }
@@ -239,7 +235,7 @@ class ServiceEtlServiceTest {
         }.`when`(repository).syncGameStatuses(anyList())
         doAnswer {
             events += "calculator-calculate"
-            emptySlice3CalculationResult()
+            emptySlice6CalculationResult()
         }.`when`(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
         doAnswer {
             events += "service-rebuild-core"
@@ -263,14 +259,10 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `keeps slice2 diff-based sources cursorless and logs deferred slice6 sources without cursor writes after empty slice5 rebuild`() {
+    fun `keeps slice2 and slice6 projection sources cursorless after empty rebuild`() {
         `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
         `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
-            slice3CalculationResult(
-                perTableGameIds = emptyMap(),
-                cursorFromByTable = SLICE3_SOURCE_TABLES.associateWith { 200L },
-                cursorTo = 300L,
-            )
+            slice6CalculationResult(perTableGameIds = emptyMap())
         )
 
         val runId = UUID.randomUUID()
@@ -279,6 +271,7 @@ class ServiceEtlServiceTest {
         assertEquals(28, sourceLogs.size)
         val gameStatusLog = sourceLogs.first { it.tableName == "game_status" }
         val gameLog = sourceLogs.first { it.tableName == "game" }
+        val websiteLog = sourceLogs.first { it.tableName == "website" }
 
         assertEquals("completed", gameStatusLog.status)
         assertEquals(0, gameStatusLog.processedRows)
@@ -289,20 +282,28 @@ class ServiceEtlServiceTest {
         assertEquals(0, gameLog.processedRows)
         assertNull(gameLog.cursorFrom)
         assertNull(gameLog.cursorTo)
-        assertTrue(gameLog.note!!.contains("slice5 projections rebuilt"))
+        assertTrue(gameLog.note!!.contains("slice6 projections rebuilt"))
 
-        val websiteLog = sourceLogs.first { it.tableName == "website" }
         assertEquals("completed", websiteLog.status)
         assertEquals(0, websiteLog.processedRows)
-        assertEquals(200L, websiteLog.cursorFrom)
-        assertEquals(300L, websiteLog.cursorTo)
-        assertTrue(websiteLog.note!!.contains("deferred source dry-run"))
+        assertNull(websiteLog.cursorFrom)
+        assertNull(websiteLog.cursorTo)
+        assertTrue(websiteLog.note!!.contains("slice6 projections rebuilt"))
 
         verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
         verify(repository).rebuildGameDependentBridgeProjections(
             anyLongSet(),
             anyList(),
             anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
+        verify(repository).rebuildGameMediaProjections(
+            anyLongSet(),
             anyList(),
             anyList(),
             anyList(),
@@ -343,24 +344,36 @@ class ServiceEtlServiceTest {
             anyList(),
             anyList(),
         )
+        verify(repository, never()).rebuildGameMediaProjections(
+            anyLongSet(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
     }
 
     @Test
-    fun `marks run failed when slice5 bridge projection rebuild throws and does not advance deferred source cursors`() {
+    fun `marks run failed when slice6 media projection rebuild throws`() {
         `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(
             preparedAffectedGameInputs(gameIds = linkedSetOf(101L, 102L, 103L))
         )
         `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
-            slice3CalculationResult(
-                perTableGameIds = mapOf("game" to setOf(101L), "release_date" to setOf(102L), "involved_company" to setOf(103L)),
+            slice6CalculationResult(
+                perTableGameIds = mapOf(
+                    "game" to setOf(101L),
+                    "release_date" to setOf(102L),
+                    "involved_company" to setOf(103L),
+                    "cover" to setOf(101L),
+                ),
             )
         )
-        doThrow(RuntimeException("bridge projection rebuild failed"))
+        doThrow(RuntimeException("media projection rebuild failed"))
             .`when`(repository)
-            .rebuildGameDependentBridgeProjections(
+            .rebuildGameMediaProjections(
                 anyLongSet(),
-                anyList(),
-                anyList(),
                 anyList(),
                 anyList(),
                 anyList(),
@@ -389,9 +402,18 @@ class ServiceEtlServiceTest {
             anyList(),
             anyList(),
         )
+        verify(repository).rebuildGameMediaProjections(
+            anyLongSet(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
         assertEquals(listOf("failed"), finishedStatuses)
         assertEquals(emptyList(), cursorWrites)
-        assertTrue(sourceLogs.none { it.tableName in SLICE3_SOURCE_TABLES })
+        assertTrue(sourceLogs.none { it.tableName in SLICE6_SOURCE_TABLES })
     }
 
     private fun stubEmptySlice2Syncs() {
@@ -453,7 +475,12 @@ class ServiceEtlServiceTest {
             gameKeywordRows = emptyList(),
             gameCompanyRows = emptyList(),
             gameRelationRows = emptyList(),
-            deferredSourceResults = emptyList(),
+            coverRows = emptyList(),
+            artworkRows = emptyList(),
+            screenshotRows = emptyList(),
+            gameVideoRows = emptyList(),
+            websiteRows = emptyList(),
+            alternativeNameRows = emptyList(),
         )
 
     private fun preparedAffectedGameInputs(gameIds: Set<Long>): PreparedAffectedGameIdInputs =
@@ -479,35 +506,79 @@ class ServiceEtlServiceTest {
                 )
             },
             gameRelationRows = emptyList(),
-            deferredSourceResults = emptyList(),
+            coverRows = gameIds.map { gameId ->
+                CoverProjectionRow(
+                    id = gameId + 2000,
+                    gameId = gameId,
+                    gameLocalizationId = gameId,
+                    imageId = "cover-$gameId",
+                    url = "https://example.com/cover-$gameId",
+                    isMain = true,
+                )
+            },
+            artworkRows = gameIds.map { gameId ->
+                ArtworkProjectionRow(
+                    id = gameId + 3000,
+                    gameId = gameId,
+                    imageId = "artwork-$gameId",
+                    url = "https://example.com/artwork-$gameId",
+                )
+            },
+            screenshotRows = gameIds.map { gameId ->
+                ScreenshotProjectionRow(
+                    id = gameId + 4000,
+                    gameId = gameId,
+                    imageId = "screenshot-$gameId",
+                    url = "https://example.com/screenshot-$gameId",
+                )
+            },
+            gameVideoRows = gameIds.map { gameId ->
+                GameVideoProjectionRow(
+                    id = gameId + 5000,
+                    gameId = gameId,
+                    name = "video-$gameId",
+                    videoId = "vid-$gameId",
+                )
+            },
+            websiteRows = gameIds.map { gameId ->
+                WebsiteProjectionRow(
+                    id = gameId + 6000,
+                    gameId = gameId,
+                    typeId = null,
+                    url = "https://example.com/site-$gameId",
+                    isTrusted = true,
+                )
+            },
+            alternativeNameRows = gameIds.map { gameId ->
+                AlternativeNameProjectionRow(
+                    id = gameId + 7000,
+                    gameId = gameId,
+                    name = "alt-$gameId",
+                    comment = "comment-$gameId",
+                )
+            },
         )
 
-    private fun emptySlice3CalculationResult(): AffectedGameIdCalculationResult =
-        slice3CalculationResult(perTableGameIds = emptyMap())
+    private fun emptySlice6CalculationResult(): AffectedGameIdCalculationResult =
+        slice6CalculationResult(perTableGameIds = emptyMap())
 
-    private fun slice3CalculationResult(
+    private fun slice6CalculationResult(
         perTableGameIds: Map<String, Set<Long>>,
-        cursorFromByTable: Map<String, Long> = emptyMap(),
-        cursorTo: Long = SLICE3_CURSOR_TO,
         noteByTable: Map<String, String> = emptyMap(),
     ): AffectedGameIdCalculationResult {
-        val sourceResults = SLICE3_SOURCE_TABLES.map { tableName ->
-            val materializedInCurrentSlice = tableName in SLICE5_MATERIALIZED_SOURCE_TABLES
+        val sourceResults = SLICE6_SOURCE_TABLES.map { tableName ->
             AffectedGameIdSourceResult(
                 tableName = tableName,
-                cursorFrom = if (materializedInCurrentSlice) null else cursorFromByTable[tableName],
-                cursorTo = if (materializedInCurrentSlice) null else cursorTo,
+                cursorFrom = null,
+                cursorTo = null,
                 affectedGameIds = perTableGameIds[tableName].orEmpty(),
-                note = noteByTable[tableName]
-                    ?: if (materializedInCurrentSlice) "slice5 projection diff test note" else "slice5 deferred dry-run test note",
-                materializedInCurrentSlice = materializedInCurrentSlice,
+                note = noteByTable[tableName] ?: "slice6 projection diff test note",
+                materializedInCurrentSlice = true,
                 advanceCursor = false,
             )
         }
         val affectedGameIds = linkedSetOf<Long>()
-        sourceResults
-            .filter { it.materializedInCurrentSlice }
-            .forEach { affectedGameIds += it.affectedGameIds }
+        sourceResults.forEach { affectedGameIds += it.affectedGameIds }
         return AffectedGameIdCalculationResult(
             affectedGameIds = affectedGameIds,
             sourceResults = sourceResults,

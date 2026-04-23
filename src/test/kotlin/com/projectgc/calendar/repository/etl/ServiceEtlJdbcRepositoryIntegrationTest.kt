@@ -124,6 +124,7 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
                 ports BIGINT[] NULL,
                 standalone_expansions BIGINT[] NULL,
                 similar_games BIGINT[] NULL,
+                cover BIGINT NULL,
                 genres BIGINT[] NULL,
                 themes BIGINT[] NULL,
                 player_perspectives BIGINT[] NULL,
@@ -182,6 +183,56 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
             )
             """.trimIndent(),
             """
+            CREATE TABLE ingest.cover (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NULL,
+                game_localization BIGINT NULL,
+                image_id TEXT NULL,
+                url TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE ingest.artwork (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NOT NULL,
+                image_id TEXT NULL,
+                url TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE ingest.screenshot (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NOT NULL,
+                image_id TEXT NULL,
+                url TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE ingest.game_video (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NOT NULL,
+                name TEXT NULL,
+                video_id TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE ingest.website (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NOT NULL,
+                type BIGINT NULL,
+                url TEXT NULL,
+                trusted BOOLEAN NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE ingest.alternative_name (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NOT NULL,
+                name TEXT NULL,
+                comment TEXT NULL
+            )
+            """.trimIndent(),
+            """
             CREATE TABLE service.game (
                 id BIGINT PRIMARY KEY,
                 slug TEXT NULL,
@@ -228,6 +279,7 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
             "CREATE TABLE service.game_mode (id BIGINT PRIMARY KEY)",
             "CREATE TABLE service.keyword (id BIGINT PRIMARY KEY)",
             "CREATE TABLE service.company (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE service.website_type (id BIGINT PRIMARY KEY)",
             """
             CREATE TABLE service.game_language (
                 game_id BIGINT NOT NULL,
@@ -262,6 +314,57 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
                 game_id BIGINT NOT NULL,
                 related_game_id BIGINT NOT NULL,
                 relation_type TEXT NOT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.cover (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                game_localization_id BIGINT NULL,
+                image_id TEXT NULL,
+                url TEXT NULL,
+                is_main BOOLEAN NOT NULL DEFAULT FALSE
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.artwork (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                image_id TEXT NULL,
+                url TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.screenshot (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                image_id TEXT NULL,
+                url TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.game_video (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                name TEXT NULL,
+                video_id TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.website (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                type_id BIGINT NULL,
+                url TEXT NULL,
+                is_trusted BOOLEAN NOT NULL DEFAULT FALSE
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.alternative_name (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                name TEXT NULL,
+                comment TEXT NULL
             )
             """.trimIndent(),
             "CREATE TABLE service.etl_cursor (table_name TEXT PRIMARY KEY, last_synced_at BIGINT NOT NULL, synced_at TIMESTAMP NOT NULL)",

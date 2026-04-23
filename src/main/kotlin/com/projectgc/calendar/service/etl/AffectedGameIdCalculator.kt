@@ -1,6 +1,10 @@
 package com.projectgc.calendar.service.etl
 
+import com.projectgc.calendar.repository.etl.AlternativeNameProjectionRow
+import com.projectgc.calendar.repository.etl.ArtworkProjectionRow
+import com.projectgc.calendar.repository.etl.CoverProjectionRow
 import com.projectgc.calendar.repository.etl.GameCompanyProjectionRow
+import com.projectgc.calendar.repository.etl.GameVideoProjectionRow
 import com.projectgc.calendar.repository.etl.GameDimensionProjectionRow
 import com.projectgc.calendar.repository.etl.GameLanguageProjectionRow
 import com.projectgc.calendar.repository.etl.GameLocalizationProjectionRow
@@ -8,7 +12,12 @@ import com.projectgc.calendar.repository.etl.GameProjectionRow
 import com.projectgc.calendar.repository.etl.GameRelationProjectionRow
 import com.projectgc.calendar.repository.etl.GameReleaseProjectionRow
 import com.projectgc.calendar.repository.etl.IngestEtlReadJdbcRepository
+import com.projectgc.calendar.repository.etl.ScreenshotProjectionRow
 import com.projectgc.calendar.repository.etl.ServiceEtlJdbcRepository
+import com.projectgc.calendar.repository.etl.WebsiteProjectionRow
+import com.projectgc.calendar.repository.etl.resolveAlternativeNameReferences
+import com.projectgc.calendar.repository.etl.resolveArtworkReferences
+import com.projectgc.calendar.repository.etl.resolveCoverReferences
 import com.projectgc.calendar.repository.etl.resolveGameCompanyReferences
 import com.projectgc.calendar.repository.etl.resolveGameDimensionReferences
 import com.projectgc.calendar.repository.etl.resolveGameLanguageReferences
@@ -16,6 +25,9 @@ import com.projectgc.calendar.repository.etl.resolveGameLocalizationReferences
 import com.projectgc.calendar.repository.etl.resolveGameReferences
 import com.projectgc.calendar.repository.etl.resolveGameRelationReferences
 import com.projectgc.calendar.repository.etl.resolveGameReleaseReferences
+import com.projectgc.calendar.repository.etl.resolveGameVideoReferences
+import com.projectgc.calendar.repository.etl.resolveScreenshotReferences
+import com.projectgc.calendar.repository.etl.resolveWebsiteReferences
 import org.springframework.stereotype.Service
 
 @Service
@@ -25,24 +37,30 @@ class AffectedGameIdCalculator(
 ) {
     companion object {
         private const val GAME_PROJECTION_DIFF_NOTE =
-            "slice5 affected game_id diff calculated from service.game core and bridge projections"
+            "slice6 affected game_id diff calculated from service.game core and bridge projections"
         private const val GAME_RELEASE_DIFF_NOTE =
-            "slice5 affected game_id diff calculated from service.game_release projection"
+            "slice6 affected game_id diff calculated from service.game_release projection"
         private const val INVOLVED_COMPANY_DIFF_NOTE =
-            "slice5 affected game_id diff calculated from service.game_company projection"
+            "slice6 affected game_id diff calculated from service.game_company projection"
         private const val LANGUAGE_SUPPORT_DIFF_NOTE =
-            "slice5 affected game_id diff calculated from service.game_language projection"
+            "slice6 affected game_id diff calculated from service.game_language projection"
         private const val GAME_LOCALIZATION_DIFF_NOTE =
-            "slice5 affected game_id diff calculated from service.game_localization projection"
-        private const val INITIAL_FULL_SWEEP_NOTE =
-            "slice5 deferred source dry-run: initial full sweep because cursor is missing"
-        private const val UPDATED_AT_DELTA_NOTE =
-            "slice5 deferred source dry-run: affected game_id delta calculated from source updated_at"
-        private const val GAME_UPDATED_STRATEGY_NOTE =
-            "slice5 deferred source dry-run: affected game_id delta calculated from ingest.game.updated_at"
+            "slice6 affected game_id diff calculated from service.game_localization projection"
+        private const val COVER_DIFF_NOTE =
+            "slice6 affected game_id diff calculated from service.cover projection"
+        private const val ARTWORK_DIFF_NOTE =
+            "slice6 affected game_id diff calculated from service.artwork projection"
+        private const val SCREENSHOT_DIFF_NOTE =
+            "slice6 affected game_id diff calculated from service.screenshot projection"
+        private const val GAME_VIDEO_DIFF_NOTE =
+            "slice6 affected game_id diff calculated from service.game_video projection"
+        private const val WEBSITE_DIFF_NOTE =
+            "slice6 affected game_id diff calculated from service.website projection"
+        private const val ALTERNATIVE_NAME_DIFF_NOTE =
+            "slice6 affected game_id diff calculated from service.alternative_name projection"
     }
 
-    fun prepare(syncStartedAt: Long): PreparedAffectedGameIdInputs {
+    fun prepare(@Suppress("UNUSED_PARAMETER") syncStartedAt: Long): PreparedAffectedGameIdInputs {
         val allGameIds = ingestEtlReadJdbcRepository.findAllIngestGameIds().toSet()
         return PreparedAffectedGameIdInputs(
             allGameIds = allGameIds,
@@ -57,14 +75,12 @@ class AffectedGameIdCalculator(
             gameKeywordRows = ingestEtlReadJdbcRepository.loadAllGameArrayProjectionRows("keywords"),
             gameCompanyRows = ingestEtlReadJdbcRepository.loadAllGameCompanyProjectionRows(),
             gameRelationRows = ingestEtlReadJdbcRepository.loadAllGameRelationProjectionRows(),
-            deferredSourceResults = listOf(
-                collectGameUpdatedDryRunSource("cover", syncStartedAt, allGameIds),
-                collectGameUpdatedDryRunSource("artwork", syncStartedAt, allGameIds),
-                collectGameUpdatedDryRunSource("screenshot", syncStartedAt, allGameIds),
-                collectGameUpdatedDryRunSource("game_video", syncStartedAt, allGameIds),
-                collectGameUpdatedDryRunSource("website", syncStartedAt, allGameIds),
-                collectGameUpdatedDryRunSource("alternative_name", syncStartedAt, allGameIds),
-            ),
+            coverRows = ingestEtlReadJdbcRepository.loadAllCoverProjectionRows(),
+            artworkRows = ingestEtlReadJdbcRepository.loadAllArtworkProjectionRows(),
+            screenshotRows = ingestEtlReadJdbcRepository.loadAllScreenshotProjectionRows(),
+            gameVideoRows = ingestEtlReadJdbcRepository.loadAllGameVideoProjectionRows(),
+            websiteRows = ingestEtlReadJdbcRepository.loadAllWebsiteProjectionRows(),
+            alternativeNameRows = ingestEtlReadJdbcRepository.loadAllAlternativeNameProjectionRows(),
         )
     }
 
@@ -110,7 +126,55 @@ class AffectedGameIdCalculator(
                     localizationRows = preparedInputs.gameLocalizationRows,
                 ),
             ),
-        ) + preparedInputs.deferredSourceResults
+            projectionDiffResult(
+                tableName = "cover",
+                note = COVER_DIFF_NOTE,
+                affectedGameIds = findAffectedGameIdsFromCoverProjectionDiff(
+                    ingestGameIds = allGameIds,
+                    preparedInputs = preparedInputs,
+                ),
+            ),
+            projectionDiffResult(
+                tableName = "artwork",
+                note = ARTWORK_DIFF_NOTE,
+                affectedGameIds = findAffectedGameIdsFromArtworkProjectionDiff(
+                    ingestGameIds = allGameIds,
+                    artworkRows = preparedInputs.artworkRows,
+                ),
+            ),
+            projectionDiffResult(
+                tableName = "screenshot",
+                note = SCREENSHOT_DIFF_NOTE,
+                affectedGameIds = findAffectedGameIdsFromScreenshotProjectionDiff(
+                    ingestGameIds = allGameIds,
+                    screenshotRows = preparedInputs.screenshotRows,
+                ),
+            ),
+            projectionDiffResult(
+                tableName = "game_video",
+                note = GAME_VIDEO_DIFF_NOTE,
+                affectedGameIds = findAffectedGameIdsFromGameVideoProjectionDiff(
+                    ingestGameIds = allGameIds,
+                    gameVideoRows = preparedInputs.gameVideoRows,
+                ),
+            ),
+            projectionDiffResult(
+                tableName = "website",
+                note = WEBSITE_DIFF_NOTE,
+                affectedGameIds = findAffectedGameIdsFromWebsiteProjectionDiff(
+                    ingestGameIds = allGameIds,
+                    websiteRows = preparedInputs.websiteRows,
+                ),
+            ),
+            projectionDiffResult(
+                tableName = "alternative_name",
+                note = ALTERNATIVE_NAME_DIFF_NOTE,
+                affectedGameIds = findAffectedGameIdsFromAlternativeNameProjectionDiff(
+                    ingestGameIds = allGameIds,
+                    alternativeNameRows = preparedInputs.alternativeNameRows,
+                ),
+            ),
+        )
 
         val affectedGameIds = linkedSetOf<Long>()
         sourceResults
@@ -136,35 +200,6 @@ class AffectedGameIdCalculator(
         materializedInCurrentSlice = true,
         advanceCursor = false,
     )
-
-    private fun collectGameUpdatedDryRunSource(
-        tableName: String,
-        syncStartedAt: Long,
-        allGameIds: Set<Long>,
-    ): AffectedGameIdSourceResult {
-        val cursorFrom = serviceEtlJdbcRepository.findCursor(tableName)
-        return if (cursorFrom == null) {
-            AffectedGameIdSourceResult(
-                tableName = tableName,
-                cursorFrom = null,
-                cursorTo = syncStartedAt,
-                affectedGameIds = allGameIds,
-                note = INITIAL_FULL_SWEEP_NOTE,
-                materializedInCurrentSlice = false,
-                advanceCursor = false,
-            )
-        } else {
-            AffectedGameIdSourceResult(
-                tableName = tableName,
-                cursorFrom = cursorFrom,
-                cursorTo = syncStartedAt,
-                affectedGameIds = ingestEtlReadJdbcRepository.findAffectedGameIdsFromGameUpdatedAt(cursorFrom),
-                note = GAME_UPDATED_STRATEGY_NOTE,
-                materializedInCurrentSlice = false,
-                advanceCursor = false,
-            )
-        }
-    }
 
     private fun findAffectedGameIdsFromGameProjectionDiff(preparedInputs: PreparedAffectedGameIdInputs): Set<Long> =
         linkedSetOf<Long>().apply {
@@ -360,6 +395,121 @@ class AffectedGameIdCalculator(
         )
     }
 
+    private fun findAffectedGameIdsFromCoverProjectionDiff(
+        ingestGameIds: Set<Long>,
+        preparedInputs: PreparedAffectedGameIdInputs,
+    ): Set<Long> {
+        val expectedLocalizationsById = resolveGameLocalizationReferences(
+            rows = preparedInputs.gameLocalizationRows,
+            availableGameIds = ingestGameIds,
+            availableRegionIds = serviceEtlJdbcRepository.loadIds("service.region"),
+        ).associate { it.id to it.gameId }
+        val expectedRows = resolveCoverReferences(
+            rows = preparedInputs.coverRows,
+            availableGameIds = ingestGameIds,
+            availableGameLocalizationsById = expectedLocalizationsById,
+        )
+        val actualRows = serviceEtlJdbcRepository.loadCurrentCoverProjectionRows()
+        return findAffectedGameIdsByKey(
+            expectedRows = expectedRows,
+            actualRows = actualRows,
+            keySelector = { it.id },
+            gameIdSelector = { it.gameId },
+            includeActualGameId = { it in ingestGameIds },
+        )
+    }
+
+    private fun findAffectedGameIdsFromArtworkProjectionDiff(
+        ingestGameIds: Set<Long>,
+        artworkRows: List<ArtworkProjectionRow>,
+    ): Set<Long> {
+        val expectedRows = resolveArtworkReferences(
+            rows = artworkRows,
+            availableGameIds = ingestGameIds,
+        )
+        val actualRows = serviceEtlJdbcRepository.loadCurrentArtworkProjectionRows()
+        return findAffectedGameIdsByKey(
+            expectedRows = expectedRows,
+            actualRows = actualRows,
+            keySelector = { it.id },
+            gameIdSelector = { it.gameId },
+            includeActualGameId = { it in ingestGameIds },
+        )
+    }
+
+    private fun findAffectedGameIdsFromScreenshotProjectionDiff(
+        ingestGameIds: Set<Long>,
+        screenshotRows: List<ScreenshotProjectionRow>,
+    ): Set<Long> {
+        val expectedRows = resolveScreenshotReferences(
+            rows = screenshotRows,
+            availableGameIds = ingestGameIds,
+        )
+        val actualRows = serviceEtlJdbcRepository.loadCurrentScreenshotProjectionRows()
+        return findAffectedGameIdsByKey(
+            expectedRows = expectedRows,
+            actualRows = actualRows,
+            keySelector = { it.id },
+            gameIdSelector = { it.gameId },
+            includeActualGameId = { it in ingestGameIds },
+        )
+    }
+
+    private fun findAffectedGameIdsFromGameVideoProjectionDiff(
+        ingestGameIds: Set<Long>,
+        gameVideoRows: List<GameVideoProjectionRow>,
+    ): Set<Long> {
+        val expectedRows = resolveGameVideoReferences(
+            rows = gameVideoRows,
+            availableGameIds = ingestGameIds,
+        )
+        val actualRows = serviceEtlJdbcRepository.loadCurrentGameVideoProjectionRows()
+        return findAffectedGameIdsByKey(
+            expectedRows = expectedRows,
+            actualRows = actualRows,
+            keySelector = { it.id },
+            gameIdSelector = { it.gameId },
+            includeActualGameId = { it in ingestGameIds },
+        )
+    }
+
+    private fun findAffectedGameIdsFromWebsiteProjectionDiff(
+        ingestGameIds: Set<Long>,
+        websiteRows: List<WebsiteProjectionRow>,
+    ): Set<Long> {
+        val expectedRows = resolveWebsiteReferences(
+            rows = websiteRows,
+            availableGameIds = ingestGameIds,
+            availableTypeIds = serviceEtlJdbcRepository.loadIds("service.website_type"),
+        )
+        val actualRows = serviceEtlJdbcRepository.loadCurrentWebsiteProjectionRows()
+        return findAffectedGameIdsByKey(
+            expectedRows = expectedRows,
+            actualRows = actualRows,
+            keySelector = { it.id },
+            gameIdSelector = { it.gameId },
+            includeActualGameId = { it in ingestGameIds },
+        )
+    }
+
+    private fun findAffectedGameIdsFromAlternativeNameProjectionDiff(
+        ingestGameIds: Set<Long>,
+        alternativeNameRows: List<AlternativeNameProjectionRow>,
+    ): Set<Long> {
+        val expectedRows = resolveAlternativeNameReferences(
+            rows = alternativeNameRows,
+            availableGameIds = ingestGameIds,
+        )
+        val actualRows = serviceEtlJdbcRepository.loadCurrentAlternativeNameProjectionRows()
+        return findAffectedGameIdsByKey(
+            expectedRows = expectedRows,
+            actualRows = actualRows,
+            keySelector = { it.id },
+            gameIdSelector = { it.gameId },
+            includeActualGameId = { it in ingestGameIds },
+        )
+    }
+
     private fun <T, K> findAffectedGameIdsByKey(
         expectedRows: List<T>,
         actualRows: List<T>,
@@ -409,7 +559,12 @@ data class PreparedAffectedGameIdInputs(
     val gameKeywordRows: List<GameDimensionProjectionRow>,
     val gameCompanyRows: List<GameCompanyProjectionRow>,
     val gameRelationRows: List<GameRelationProjectionRow>,
-    val deferredSourceResults: List<AffectedGameIdSourceResult>,
+    val coverRows: List<CoverProjectionRow>,
+    val artworkRows: List<ArtworkProjectionRow>,
+    val screenshotRows: List<ScreenshotProjectionRow>,
+    val gameVideoRows: List<GameVideoProjectionRow>,
+    val websiteRows: List<WebsiteProjectionRow>,
+    val alternativeNameRows: List<AlternativeNameProjectionRow>,
 )
 
 data class AffectedGameIdCalculationResult(

@@ -454,6 +454,27 @@
 
 ## Slice 6. 미디어/부가 projection 재구성
 
+### 현재 상태
+
+승인.
+
+정리:
+
+- `service.cover`, `service.artwork`, `service.screenshot`, `service.game_video`, `service.website`, `service.alternative_name`에 대한 ingest reader와 service rebuild 경로가 `calendar` 내부에 구현되었다.
+- `AffectedGameIdCalculator`는 이 6개 source를 projection diff 대상으로 포함하고, 더 이상 deferred dry-run으로 두지 않는다.
+- `ServiceEtlService`는 core/bridge rebuild 뒤에 media rebuild를 호출해 affected `game_id` 기준으로 media projection을 함께 재구성한다.
+- `ServiceEtlJdbcRepository.rebuildGameMediaProjections()`는 game 단위 delete + insert replace 패턴으로 stale row를 정리한다.
+- `cover.is_main` 판단과 `game_localization_id` 소유권 정리 로직도 반영되었다.
+- 관련 단위 테스트, 서비스 테스트, support 테스트는 Slice 6 semantics 기준으로 갱신되었다.
+
+### 후속 메모
+
+- 루트 game 삭제와 mismatch 검증/재시도는 여전히 Slice 7 범위다.
+- media projection의 핵심 SQL 경로는 아직 repository integration test로 충분히 고정되지 않았다.
+- 우선순위가 높은 통합 검증 경계는 `cover.is_main`, media stale row 제거, `website.type_id` null 정리, `alternative_name.comment` 매핑이다.
+- 현재 integration test는 relation 중심이고 수기 스키마 기반이어서, 장기적으로는 media 케이스 추가와 Flyway 기준 검증이 필요하다.
+- `processedRows`는 실제 media row 수가 아니라 source별 affected game 수라는 의미로 기록된다는 점을 운영 로그 해석에서 주의해야 한다.
+
 ### 목표
 
 게임 부가 데이터 projection을 추가한다.
@@ -475,6 +496,7 @@
 ### 리뷰 포인트
 
 - 미디어/부가 projection 책임이 `calendar`에 머무는지
+- media source가 더 이상 deferred dry-run이 아닌 실제 materialized source로 승격됐는지
 - `cover.is_main` 같은 교차 의존 판단
 - 미디어 삭제 시 stale row 제거
 - game 단위 replace 범위 적절성
@@ -482,6 +504,9 @@
 ### 승인 기준
 
 - 미디어/부가 projection이 affected `game_id` 기준으로 정확히 replace된다.
+- `cover`, `artwork`, `screenshot`, `game_video`, `website`, `alternative_name`가 더 이상 dry-run source로 남지 않는다.
+- media-only 변경도 해당 게임의 media projection 재구성을 유발한다.
+- media projection 성공 시 해당 source는 materialized source로 기록되고, 기존 dry-run 기대 테스트가 제거되거나 갱신된다.
 
 ## Slice 7. 삭제, 검증, 재시도 마감
 

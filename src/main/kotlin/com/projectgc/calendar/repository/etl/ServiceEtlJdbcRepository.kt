@@ -463,6 +463,105 @@ class ServiceEtlJdbcRepository(
             )
         }
 
+    fun loadCurrentCoverProjectionRows(): List<CoverProjectionRow> =
+        jdbc.query(
+            """
+            SELECT id, game_id, game_localization_id, image_id, url, is_main
+            FROM service.cover
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            CoverProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                gameLocalizationId = rs.getLong("game_localization_id").takeIf { !rs.wasNull() },
+                imageId = rs.getString("image_id"),
+                url = rs.getString("url"),
+                isMain = rs.getBoolean("is_main"),
+            )
+        }
+
+    fun loadCurrentArtworkProjectionRows(): List<ArtworkProjectionRow> =
+        jdbc.query(
+            """
+            SELECT id, game_id, image_id, url
+            FROM service.artwork
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            ArtworkProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                imageId = rs.getString("image_id"),
+                url = rs.getString("url"),
+            )
+        }
+
+    fun loadCurrentScreenshotProjectionRows(): List<ScreenshotProjectionRow> =
+        jdbc.query(
+            """
+            SELECT id, game_id, image_id, url
+            FROM service.screenshot
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            ScreenshotProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                imageId = rs.getString("image_id"),
+                url = rs.getString("url"),
+            )
+        }
+
+    fun loadCurrentGameVideoProjectionRows(): List<GameVideoProjectionRow> =
+        jdbc.query(
+            """
+            SELECT id, game_id, name, video_id
+            FROM service.game_video
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            GameVideoProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                name = rs.getString("name"),
+                videoId = rs.getString("video_id"),
+            )
+        }
+
+    fun loadCurrentWebsiteProjectionRows(): List<WebsiteProjectionRow> =
+        jdbc.query(
+            """
+            SELECT id, game_id, type_id, url, is_trusted
+            FROM service.website
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            WebsiteProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                typeId = rs.getLong("type_id").takeIf { !rs.wasNull() },
+                url = rs.getString("url"),
+                isTrusted = rs.getBoolean("is_trusted"),
+            )
+        }
+
+    fun loadCurrentAlternativeNameProjectionRows(): List<AlternativeNameProjectionRow> =
+        jdbc.query(
+            """
+            SELECT id, game_id, name, comment
+            FROM service.alternative_name
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            AlternativeNameProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                name = rs.getString("name"),
+                comment = rs.getString("comment"),
+            )
+        }
+
     fun rebuildCoreGameProjections(
         gameRows: List<GameProjectionRow>,
         gameLocalizationRows: List<GameLocalizationProjectionRow>,
@@ -675,6 +774,138 @@ class ServiceEtlJdbcRepository(
         }
     }
 
+    fun rebuildGameMediaProjections(
+        materializedGameIds: Set<Long>,
+        coverRows: List<CoverProjectionRow>,
+        artworkRows: List<ArtworkProjectionRow>,
+        screenshotRows: List<ScreenshotProjectionRow>,
+        gameVideoRows: List<GameVideoProjectionRow>,
+        websiteRows: List<WebsiteProjectionRow>,
+        alternativeNameRows: List<AlternativeNameProjectionRow>,
+    ) {
+        if (materializedGameIds.isEmpty()) {
+            return
+        }
+
+        val availableGameIds = loadIds("service.game")
+        val availableGameLocalizationsById = loadCurrentGameLocalizationProjectionRows()
+            .associate { it.id to it.gameId }
+
+        deleteByGameIds("service.cover", materializedGameIds)
+        val resolvedCoverRows = resolveCoverReferences(
+            rows = coverRows,
+            availableGameIds = availableGameIds,
+            availableGameLocalizationsById = availableGameLocalizationsById,
+        )
+        batchUpsert(
+            """
+            INSERT INTO service.cover
+                (id, game_id, game_localization_id, image_id, url, is_main)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            resolvedCoverRows,
+        ) { row ->
+            setLong(1, row.id)
+            setLong(2, row.gameId)
+            setNullableLong(3, row.gameLocalizationId)
+            setNullableString(4, row.imageId)
+            setNullableString(5, row.url)
+            setBoolean(6, row.isMain)
+        }
+
+        rebuildGameMediaProjection(
+            tableName = "service.artwork",
+            materializedGameIds = materializedGameIds,
+            resolvedRows = resolveArtworkReferences(
+                rows = artworkRows,
+                availableGameIds = availableGameIds,
+            ),
+            sql = """
+                INSERT INTO service.artwork (id, game_id, image_id, url)
+                VALUES (?, ?, ?, ?)
+            """.trimIndent(),
+        ) { row ->
+            setLong(1, row.id)
+            setLong(2, row.gameId)
+            setNullableString(3, row.imageId)
+            setNullableString(4, row.url)
+        }
+
+        rebuildGameMediaProjection(
+            tableName = "service.screenshot",
+            materializedGameIds = materializedGameIds,
+            resolvedRows = resolveScreenshotReferences(
+                rows = screenshotRows,
+                availableGameIds = availableGameIds,
+            ),
+            sql = """
+                INSERT INTO service.screenshot (id, game_id, image_id, url)
+                VALUES (?, ?, ?, ?)
+            """.trimIndent(),
+        ) { row ->
+            setLong(1, row.id)
+            setLong(2, row.gameId)
+            setNullableString(3, row.imageId)
+            setNullableString(4, row.url)
+        }
+
+        rebuildGameMediaProjection(
+            tableName = "service.game_video",
+            materializedGameIds = materializedGameIds,
+            resolvedRows = resolveGameVideoReferences(
+                rows = gameVideoRows,
+                availableGameIds = availableGameIds,
+            ),
+            sql = """
+                INSERT INTO service.game_video (id, game_id, name, video_id)
+                VALUES (?, ?, ?, ?)
+            """.trimIndent(),
+        ) { row ->
+            setLong(1, row.id)
+            setLong(2, row.gameId)
+            setNullableString(3, row.name)
+            setNullableString(4, row.videoId)
+        }
+
+        rebuildGameMediaProjection(
+            tableName = "service.website",
+            materializedGameIds = materializedGameIds,
+            resolvedRows = resolveWebsiteReferences(
+                rows = websiteRows,
+                availableGameIds = availableGameIds,
+                availableTypeIds = loadIds("service.website_type"),
+            ),
+            sql = """
+                INSERT INTO service.website (id, game_id, type_id, url, is_trusted)
+                VALUES (?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ) { row ->
+            setLong(1, row.id)
+            setLong(2, row.gameId)
+            setNullableLong(3, row.typeId)
+            setNullableString(4, row.url)
+            setBoolean(5, row.isTrusted)
+        }
+
+        rebuildGameMediaProjection(
+            tableName = "service.alternative_name",
+            materializedGameIds = materializedGameIds,
+            resolvedRows = resolveAlternativeNameReferences(
+                rows = alternativeNameRows,
+                availableGameIds = availableGameIds,
+            ),
+            sql = """
+                INSERT INTO service.alternative_name (id, game_id, name, comment)
+                VALUES (?, ?, ?, ?)
+            """.trimIndent(),
+        ) { row ->
+            setLong(1, row.id)
+            setLong(2, row.gameId)
+            setNullableString(3, row.name)
+            setNullableString(4, row.comment)
+        }
+    }
+
     private fun syncNamedDimensionByDiff(
         sourceRows: List<NamedDimensionRow>,
         targetTable: String,
@@ -834,6 +1065,21 @@ class ServiceEtlJdbcRepository(
             setLong(1, row.gameId)
             setLong(2, row.dimensionId)
         }
+    }
+
+    private fun <T> rebuildGameMediaProjection(
+        tableName: String,
+        materializedGameIds: Set<Long>,
+        resolvedRows: List<T>,
+        sql: String,
+        setter: PreparedStatement.(T) -> Unit,
+    ) {
+        deleteByGameIds(tableName, materializedGameIds)
+        batchUpsert(
+            sql = sql,
+            rows = resolvedRows,
+            setter = setter,
+        )
     }
 
     private fun diffResult(processedRows: Int, note: String = DIFF_NOTE) =
@@ -1016,6 +1262,51 @@ data class GameRelationProjectionRow(
     val relationType: String,
 )
 
+data class CoverProjectionRow(
+    val id: Long,
+    val gameId: Long,
+    val gameLocalizationId: Long?,
+    val imageId: String?,
+    val url: String?,
+    val isMain: Boolean,
+)
+
+data class ArtworkProjectionRow(
+    val id: Long,
+    val gameId: Long,
+    val imageId: String?,
+    val url: String?,
+)
+
+data class ScreenshotProjectionRow(
+    val id: Long,
+    val gameId: Long,
+    val imageId: String?,
+    val url: String?,
+)
+
+data class GameVideoProjectionRow(
+    val id: Long,
+    val gameId: Long,
+    val name: String?,
+    val videoId: String?,
+)
+
+data class WebsiteProjectionRow(
+    val id: Long,
+    val gameId: Long,
+    val typeId: Long?,
+    val url: String?,
+    val isTrusted: Boolean,
+)
+
+data class AlternativeNameProjectionRow(
+    val id: Long,
+    val gameId: Long,
+    val name: String?,
+    val comment: String?,
+)
+
 data class PlatformSyncRow(
     val id: Long,
     val name: String?,
@@ -1115,6 +1406,56 @@ internal fun resolveGameRelationReferences(
     availableGameIds: Set<Long>,
 ): List<GameRelationProjectionRow> = rows.mapNotNull { row ->
     row.takeIf { it.gameId in availableGameIds && it.relatedGameId in availableGameIds }
+}
+
+internal fun resolveCoverReferences(
+    rows: List<CoverProjectionRow>,
+    availableGameIds: Set<Long>,
+    availableGameLocalizationsById: Map<Long, Long>,
+): List<CoverProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds }?.copy(
+        gameLocalizationId = row.gameLocalizationId?.takeIf { localizationId ->
+            availableGameLocalizationsById[localizationId] == row.gameId
+        },
+    )
+}
+
+internal fun resolveArtworkReferences(
+    rows: List<ArtworkProjectionRow>,
+    availableGameIds: Set<Long>,
+): List<ArtworkProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds }
+}
+
+internal fun resolveScreenshotReferences(
+    rows: List<ScreenshotProjectionRow>,
+    availableGameIds: Set<Long>,
+): List<ScreenshotProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds }
+}
+
+internal fun resolveGameVideoReferences(
+    rows: List<GameVideoProjectionRow>,
+    availableGameIds: Set<Long>,
+): List<GameVideoProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds }
+}
+
+internal fun resolveWebsiteReferences(
+    rows: List<WebsiteProjectionRow>,
+    availableGameIds: Set<Long>,
+    availableTypeIds: Set<Long>,
+): List<WebsiteProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds }?.copy(
+        typeId = row.typeId?.takeIf { it in availableTypeIds },
+    )
+}
+
+internal fun resolveAlternativeNameReferences(
+    rows: List<AlternativeNameProjectionRow>,
+    availableGameIds: Set<Long>,
+): List<AlternativeNameProjectionRow> = rows.mapNotNull { row ->
+    row.takeIf { it.gameId in availableGameIds }
 }
 
 internal fun resolveCompanyReferences(rows: List<CompanySyncRow>): List<CompanySyncRow> {

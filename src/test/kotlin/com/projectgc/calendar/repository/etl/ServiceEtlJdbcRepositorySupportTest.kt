@@ -342,4 +342,114 @@ class ServiceEtlJdbcRepositorySupportTest {
             ),
         )
     }
+
+    @Test
+    fun `resolveCoverReferences keeps localization only when it belongs to the same game`() {
+        val rows = listOf(
+            CoverProjectionRow(
+                id = 10L,
+                gameId = 1L,
+                gameLocalizationId = 101L,
+                imageId = "cover-1",
+                url = null,
+                isMain = true,
+            ),
+            CoverProjectionRow(
+                id = 11L,
+                gameId = 1L,
+                gameLocalizationId = 202L,
+                imageId = "cover-2",
+                url = null,
+                isMain = false,
+            ),
+            CoverProjectionRow(
+                id = 12L,
+                gameId = 99L,
+                gameLocalizationId = null,
+                imageId = "cover-3",
+                url = null,
+                isMain = false,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                CoverProjectionRow(
+                    id = 10L,
+                    gameId = 1L,
+                    gameLocalizationId = 101L,
+                    imageId = "cover-1",
+                    url = null,
+                    isMain = true,
+                ),
+                CoverProjectionRow(
+                    id = 11L,
+                    gameId = 1L,
+                    gameLocalizationId = null,
+                    imageId = "cover-2",
+                    url = null,
+                    isMain = false,
+                ),
+            ),
+            resolveCoverReferences(
+                rows = rows,
+                availableGameIds = setOf(1L),
+                availableGameLocalizationsById = mapOf(
+                    101L to 1L,
+                    202L to 2L,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `resolveWebsiteReferences nulls unresolved type ids and drops missing games`() {
+        val rows = listOf(
+            WebsiteProjectionRow(
+                id = 10L,
+                gameId = 1L,
+                typeId = 21L,
+                url = "https://example.com",
+                isTrusted = true,
+            ),
+            WebsiteProjectionRow(
+                id = 11L,
+                gameId = 1L,
+                typeId = 22L,
+                url = "https://example.org",
+                isTrusted = false,
+            ),
+            WebsiteProjectionRow(
+                id = 12L,
+                gameId = 99L,
+                typeId = 21L,
+                url = "https://example.net",
+                isTrusted = false,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                WebsiteProjectionRow(
+                    id = 10L,
+                    gameId = 1L,
+                    typeId = 21L,
+                    url = "https://example.com",
+                    isTrusted = true,
+                ),
+                WebsiteProjectionRow(
+                    id = 11L,
+                    gameId = 1L,
+                    typeId = null,
+                    url = "https://example.org",
+                    isTrusted = false,
+                ),
+            ),
+            resolveWebsiteReferences(
+                rows = rows,
+                availableGameIds = setOf(1L),
+                availableTypeIds = setOf(21L),
+            ),
+        )
+    }
 }

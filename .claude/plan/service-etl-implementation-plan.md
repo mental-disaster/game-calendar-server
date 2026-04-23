@@ -16,8 +16,9 @@
 - Slice 4 핵심 game projection 재구성도 승인 완료 상태다.
 - Slice 5 game 종속 bridge projection 재구성도 승인 완료 상태다.
 - Slice 5A DB 분리 대응도 승인 완료 상태다.
-- 다음 작업 시작점은 Slice 6 미디어/부가 projection 재구성이다.
-- Slice 5 승인 이후에는 Slice 6으로 바로 가지 않고, `Slice 5A. DB 분리 대응: Datasource/Repository 분리`를 선행한다.
+- Slice 6 미디어/부가 projection 재구성도 승인 완료 상태다.
+- 다음 작업 시작점은 Slice 7 삭제, 검증, 재시도 마감이다.
+- Slice 5 승인 이후에는 `Slice 5A. DB 분리 대응: Datasource/Repository 분리`를 선행했고, 그 이후 Slice 6까지 구현 완료된 상태다.
 - Slice 1 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
 - Slice 2 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
 - Slice 3 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
@@ -58,6 +59,14 @@
 - split-DB 핵심 회귀 테스트가 `integrationTest` task에만 있으므로 CI와 로컬 기본 워크플로에 반영할지 결정이 필요하다.
 - 완전히 다른 JDBC URL을 쓰는 end-to-end 검증은 아직 후속 보강 대상이다.
 - 권장 방향은 `ingest` source 추출 repository와 `service` projection repository를 분리하고, 필요 시 `service` 측 staging/temp snapshot을 도입하는 것이다.
+
+### Slice 6 후속 메모
+
+- Slice 6 자체 구현은 완료됐지만, 루트 game 삭제와 mismatch 검증/재시도는 여전히 Slice 7 범위다.
+- media SQL 경로에 대한 repository integration test는 아직 relation 수준만큼 보강되지 않았다.
+- 우선순위가 높은 보강 대상은 `cover.is_main`, media stale row 제거, `website.type_id` null 정리, `alternative_name.comment` 매핑이다.
+- 현재 integration test는 수기 스키마 기반이어서, 장기적으로는 실제 Flyway 스키마 기준 검증으로 옮기는 편이 안전하다.
+- `processedRows`는 media row 수가 아니라 source별 affected game 수라는 의미로 기록된다는 점을 운영 로그 해석에서 주의해야 한다.
 
 ## 2. 확정 제약사항
 

@@ -1,5 +1,8 @@
 package com.projectgc.calendar.service.etl
 
+import com.projectgc.calendar.repository.etl.AlternativeNameProjectionRow
+import com.projectgc.calendar.repository.etl.ArtworkProjectionRow
+import com.projectgc.calendar.repository.etl.CoverProjectionRow
 import com.projectgc.calendar.repository.etl.GameCompanyProjectionRow
 import com.projectgc.calendar.repository.etl.GameDimensionProjectionRow
 import com.projectgc.calendar.repository.etl.GameLanguageProjectionRow
@@ -7,10 +10,13 @@ import com.projectgc.calendar.repository.etl.GameLocalizationProjectionRow
 import com.projectgc.calendar.repository.etl.GameProjectionRow
 import com.projectgc.calendar.repository.etl.GameRelationProjectionRow
 import com.projectgc.calendar.repository.etl.GameReleaseProjectionRow
+import com.projectgc.calendar.repository.etl.GameVideoProjectionRow
 import com.projectgc.calendar.repository.etl.IngestEtlReadJdbcRepository
+import com.projectgc.calendar.repository.etl.ScreenshotProjectionRow
 import com.projectgc.calendar.repository.etl.ServiceEtlJdbcRepository
 import com.projectgc.calendar.repository.etl.ServiceEtlSourceLogEntry
 import com.projectgc.calendar.repository.etl.ServiceEtlTableSyncResult
+import com.projectgc.calendar.repository.etl.WebsiteProjectionRow
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.stereotype.Service
@@ -31,10 +37,8 @@ class ServiceEtlService(
     companion object {
         private const val COMPLETED = "completed"
         private const val FAILED = "failed"
-        private const val SLICE5_GAME_PROJECTION_NOTE =
-            "slice5 projections rebuilt: service.game, service.game_release, service.game_localization, service.game_language, service.game_genre, service.game_theme, service.game_player_perspective, service.game_game_mode, service.game_keyword, service.game_company, service.game_relation"
-        private const val SLICE5_DEFERRED_SOURCE_NOTE =
-            "slice5 deferred source dry-run: cursor remains deferred until slice6 projection materialization"
+        private const val SLICE6_GAME_PROJECTION_NOTE =
+            "slice6 projections rebuilt: service.game, service.game_release, service.game_localization, service.game_language, service.game_genre, service.game_theme, service.game_player_perspective, service.game_game_mode, service.game_keyword, service.game_company, service.game_relation, service.cover, service.artwork, service.screenshot, service.game_video, service.website, service.alternative_name"
     }
 
     private val slice2SourceTables = listOf(
@@ -163,6 +167,15 @@ class ServiceEtlService(
             gameCompanyRows = preparedInputs.gameCompanyRows.filterCompanyRowsByGameIds(materializedGameIds),
             gameRelationRows = preparedInputs.gameRelationRows.filterRelationRowsByGameIds(materializedGameIds),
         )
+        serviceEtlJdbcRepository.rebuildGameMediaProjections(
+            materializedGameIds = materializedGameIds,
+            coverRows = preparedInputs.coverRows.filterCoverRowsByGameIds(materializedGameIds),
+            artworkRows = preparedInputs.artworkRows.filterArtworkRowsByGameIds(materializedGameIds),
+            screenshotRows = preparedInputs.screenshotRows.filterScreenshotRowsByGameIds(materializedGameIds),
+            gameVideoRows = preparedInputs.gameVideoRows.filterGameVideoRowsByGameIds(materializedGameIds),
+            websiteRows = preparedInputs.websiteRows.filterWebsiteRowsByGameIds(materializedGameIds),
+            alternativeNameRows = preparedInputs.alternativeNameRows.filterAlternativeNameRowsByGameIds(materializedGameIds),
+        )
         calculationResult.sourceResults.forEach { sourceResult ->
             val loggedAt = Instant.now()
             if (sourceResult.advanceCursor && sourceResult.cursorTo != null && sourceResult.cursorTo != sourceResult.cursorFrom) {
@@ -172,11 +185,6 @@ class ServiceEtlService(
                     syncedAt = loggedAt,
                 )
             }
-            val sliceNote = if (sourceResult.materializedInCurrentSlice) {
-                SLICE5_GAME_PROJECTION_NOTE
-            } else {
-                SLICE5_DEFERRED_SOURCE_NOTE
-            }
             serviceEtlJdbcRepository.insertSourceLog(
                 ServiceEtlSourceLogEntry(
                     runId = runId,
@@ -185,7 +193,7 @@ class ServiceEtlService(
                     processedRows = sourceResult.affectedGameIds.size,
                     cursorFrom = sourceResult.cursorFrom,
                     cursorTo = sourceResult.cursorTo,
-                    note = "${sourceResult.note}; $sliceNote",
+                    note = "${sourceResult.note}; $SLICE6_GAME_PROJECTION_NOTE",
                     startedAt = loggedAt,
                     finishedAt = loggedAt,
                 )
@@ -247,4 +255,22 @@ private fun List<GameCompanyProjectionRow>.filterCompanyRowsByGameIds(gameIds: S
     filter { it.gameId in gameIds }
 
 private fun List<GameRelationProjectionRow>.filterRelationRowsByGameIds(gameIds: Set<Long>): List<GameRelationProjectionRow> =
+    filter { it.gameId in gameIds }
+
+private fun List<CoverProjectionRow>.filterCoverRowsByGameIds(gameIds: Set<Long>): List<CoverProjectionRow> =
+    filter { it.gameId in gameIds }
+
+private fun List<ArtworkProjectionRow>.filterArtworkRowsByGameIds(gameIds: Set<Long>): List<ArtworkProjectionRow> =
+    filter { it.gameId in gameIds }
+
+private fun List<ScreenshotProjectionRow>.filterScreenshotRowsByGameIds(gameIds: Set<Long>): List<ScreenshotProjectionRow> =
+    filter { it.gameId in gameIds }
+
+private fun List<GameVideoProjectionRow>.filterGameVideoRowsByGameIds(gameIds: Set<Long>): List<GameVideoProjectionRow> =
+    filter { it.gameId in gameIds }
+
+private fun List<WebsiteProjectionRow>.filterWebsiteRowsByGameIds(gameIds: Set<Long>): List<WebsiteProjectionRow> =
+    filter { it.gameId in gameIds }
+
+private fun List<AlternativeNameProjectionRow>.filterAlternativeNameRowsByGameIds(gameIds: Set<Long>): List<AlternativeNameProjectionRow> =
     filter { it.gameId in gameIds }

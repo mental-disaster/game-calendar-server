@@ -315,6 +315,42 @@ class IngestEtlReadJdbcRepository(
     fun loadGameRelationProjectionRows(gameIds: Set<Long>): List<GameRelationProjectionRow> =
         loadGameRelationProjectionRowsInternal(gameIds)
 
+    fun loadAllCoverProjectionRows(): List<CoverProjectionRow> =
+        loadCoverProjectionRowsInternal(null)
+
+    fun loadCoverProjectionRows(gameIds: Set<Long>): List<CoverProjectionRow> =
+        loadCoverProjectionRowsInternal(gameIds)
+
+    fun loadAllArtworkProjectionRows(): List<ArtworkProjectionRow> =
+        loadArtworkProjectionRowsInternal(null)
+
+    fun loadArtworkProjectionRows(gameIds: Set<Long>): List<ArtworkProjectionRow> =
+        loadArtworkProjectionRowsInternal(gameIds)
+
+    fun loadAllScreenshotProjectionRows(): List<ScreenshotProjectionRow> =
+        loadScreenshotProjectionRowsInternal(null)
+
+    fun loadScreenshotProjectionRows(gameIds: Set<Long>): List<ScreenshotProjectionRow> =
+        loadScreenshotProjectionRowsInternal(gameIds)
+
+    fun loadAllGameVideoProjectionRows(): List<GameVideoProjectionRow> =
+        loadGameVideoProjectionRowsInternal(null)
+
+    fun loadGameVideoProjectionRows(gameIds: Set<Long>): List<GameVideoProjectionRow> =
+        loadGameVideoProjectionRowsInternal(gameIds)
+
+    fun loadAllWebsiteProjectionRows(): List<WebsiteProjectionRow> =
+        loadWebsiteProjectionRowsInternal(null)
+
+    fun loadWebsiteProjectionRows(gameIds: Set<Long>): List<WebsiteProjectionRow> =
+        loadWebsiteProjectionRowsInternal(gameIds)
+
+    fun loadAllAlternativeNameProjectionRows(): List<AlternativeNameProjectionRow> =
+        loadAlternativeNameProjectionRowsInternal(null)
+
+    fun loadAlternativeNameProjectionRows(gameIds: Set<Long>): List<AlternativeNameProjectionRow> =
+        loadAlternativeNameProjectionRowsInternal(gameIds)
+
     private fun loadNamedDimensionRows(
         sourceTable: String,
         sourceValueColumn: String,
@@ -498,6 +534,125 @@ class IngestEtlReadJdbcRepository(
             )
         }
 
+    private fun loadCoverProjectionRowsInternal(gameIds: Set<Long>?): List<CoverProjectionRow> =
+        if (gameIds == null) {
+            jdbc.query(
+                """
+                WITH cover_rows AS (
+                    SELECT
+                        c.id,
+                        COALESCE(c.game, gl.game) AS game_id,
+                        c.game_localization AS game_localization_id,
+                        c.image_id,
+                        c.url,
+                        COALESCE(g.cover = c.id, FALSE) AS is_main
+                    FROM ingest.cover c
+                    LEFT JOIN ingest.game_localization gl ON gl.id = c.game_localization
+                    LEFT JOIN ingest.game g ON g.id = COALESCE(c.game, gl.game)
+                )
+                SELECT id, game_id, game_localization_id, image_id, url, is_main
+                FROM cover_rows
+                WHERE game_id IS NOT NULL
+                ORDER BY game_id, id
+                """.trimIndent(),
+            ) { rs, _ -> rs.toCoverProjectionRow() }
+        } else {
+            queryByLongIdChunks(
+                ids = gameIds,
+                sqlBuilder = { placeholders ->
+                    """
+                    WITH cover_rows AS (
+                        SELECT
+                            c.id,
+                            COALESCE(c.game, gl.game) AS game_id,
+                            c.game_localization AS game_localization_id,
+                            c.image_id,
+                            c.url,
+                            COALESCE(g.cover = c.id, FALSE) AS is_main
+                        FROM ingest.cover c
+                        LEFT JOIN ingest.game_localization gl ON gl.id = c.game_localization
+                        LEFT JOIN ingest.game g ON g.id = COALESCE(c.game, gl.game)
+                    )
+                    SELECT id, game_id, game_localization_id, image_id, url, is_main
+                    FROM cover_rows
+                    WHERE game_id IN ($placeholders)
+                    ORDER BY game_id, id
+                    """.trimIndent()
+                },
+                rowMapper = { rs, _ -> rs.toCoverProjectionRow() },
+            )
+        }
+
+    private fun loadArtworkProjectionRowsInternal(gameIds: Set<Long>?): List<ArtworkProjectionRow> =
+        queryByOptionalGameIds(
+            gameIds = gameIds,
+            sqlBuilder = { filterClause ->
+                """
+                SELECT id, game AS game_id, image_id, url
+                FROM ingest.artwork
+                WHERE game IS NOT NULL
+                  $filterClause
+                ORDER BY game, id
+                """.trimIndent()
+            },
+        ) { rs, _ -> rs.toArtworkProjectionRow() }
+
+    private fun loadScreenshotProjectionRowsInternal(gameIds: Set<Long>?): List<ScreenshotProjectionRow> =
+        queryByOptionalGameIds(
+            gameIds = gameIds,
+            sqlBuilder = { filterClause ->
+                """
+                SELECT id, game AS game_id, image_id, url
+                FROM ingest.screenshot
+                WHERE game IS NOT NULL
+                  $filterClause
+                ORDER BY game, id
+                """.trimIndent()
+            },
+        ) { rs, _ -> rs.toScreenshotProjectionRow() }
+
+    private fun loadGameVideoProjectionRowsInternal(gameIds: Set<Long>?): List<GameVideoProjectionRow> =
+        queryByOptionalGameIds(
+            gameIds = gameIds,
+            sqlBuilder = { filterClause ->
+                """
+                SELECT id, game AS game_id, name, video_id
+                FROM ingest.game_video
+                WHERE game IS NOT NULL
+                  $filterClause
+                ORDER BY game, id
+                """.trimIndent()
+            },
+        ) { rs, _ -> rs.toGameVideoProjectionRow() }
+
+    private fun loadWebsiteProjectionRowsInternal(gameIds: Set<Long>?): List<WebsiteProjectionRow> =
+        queryByOptionalGameIds(
+            gameIds = gameIds,
+            sqlBuilder = { filterClause ->
+                """
+                SELECT id, game AS game_id, type AS type_id, url, COALESCE(trusted, FALSE) AS is_trusted
+                FROM ingest.website
+                WHERE game IS NOT NULL
+                  $filterClause
+                ORDER BY game, id
+                """.trimIndent()
+            },
+        ) { rs, _ -> rs.toWebsiteProjectionRow() }
+
+    private fun loadAlternativeNameProjectionRowsInternal(gameIds: Set<Long>?): List<AlternativeNameProjectionRow> =
+        queryByOptionalGameIds(
+            gameIds = gameIds,
+            sqlBuilder = { filterClause ->
+                """
+                SELECT id, game AS game_id, name, comment
+                FROM ingest.alternative_name
+                WHERE game IS NOT NULL
+                  $filterClause
+                ORDER BY game, id
+                """.trimIndent()
+            },
+        ) { rs, _ -> rs.toAlternativeNameProjectionRow() }
+
     private fun ResultSet.toGameProjectionRow() =
         GameProjectionRow(
             id = getLong("id"),
@@ -531,6 +686,57 @@ class IngestEtlReadJdbcRepository(
             year = getInt("y").takeIf { !wasNull() },
             month = getInt("m").takeIf { !wasNull() },
             dateHuman = getString("human"),
+        )
+
+    private fun ResultSet.toCoverProjectionRow() =
+        CoverProjectionRow(
+            id = getLong("id"),
+            gameId = getLong("game_id"),
+            gameLocalizationId = getLong("game_localization_id").takeIf { !wasNull() },
+            imageId = getString("image_id"),
+            url = getString("url"),
+            isMain = getBoolean("is_main"),
+        )
+
+    private fun ResultSet.toArtworkProjectionRow() =
+        ArtworkProjectionRow(
+            id = getLong("id"),
+            gameId = getLong("game_id"),
+            imageId = getString("image_id"),
+            url = getString("url"),
+        )
+
+    private fun ResultSet.toScreenshotProjectionRow() =
+        ScreenshotProjectionRow(
+            id = getLong("id"),
+            gameId = getLong("game_id"),
+            imageId = getString("image_id"),
+            url = getString("url"),
+        )
+
+    private fun ResultSet.toGameVideoProjectionRow() =
+        GameVideoProjectionRow(
+            id = getLong("id"),
+            gameId = getLong("game_id"),
+            name = getString("name"),
+            videoId = getString("video_id"),
+        )
+
+    private fun ResultSet.toWebsiteProjectionRow() =
+        WebsiteProjectionRow(
+            id = getLong("id"),
+            gameId = getLong("game_id"),
+            typeId = getLong("type_id").takeIf { !wasNull() },
+            url = getString("url"),
+            isTrusted = getBoolean("is_trusted"),
+        )
+
+    private fun ResultSet.toAlternativeNameProjectionRow() =
+        AlternativeNameProjectionRow(
+            id = getLong("id"),
+            gameId = getLong("game_id"),
+            name = getString("name"),
+            comment = getString("comment"),
         )
 
     private fun <T> queryByOptionalGameIds(
