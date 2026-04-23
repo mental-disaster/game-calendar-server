@@ -15,7 +15,8 @@
 - Slice 3 affected `game_id` 계산기도 승인 완료 상태다.
 - Slice 4 핵심 game projection 재구성도 승인 완료 상태다.
 - Slice 5 game 종속 bridge projection 재구성도 승인 완료 상태다.
-- 다음 작업 시작점은 `Slice 5A. DB 분리 대응: Datasource/Repository 분리`다.
+- Slice 5A DB 분리 대응도 승인 완료 상태다.
+- 다음 작업 시작점은 Slice 6 미디어/부가 projection 재구성이다.
 - Slice 5 승인 이후에는 Slice 6으로 바로 가지 않고, `Slice 5A. DB 분리 대응: Datasource/Repository 분리`를 선행한다.
 - Slice 1 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
 - Slice 2 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
@@ -52,9 +53,10 @@
 
 ### Slice 5A 후속 메모
 
-- 현재 repository에는 `ingest`와 `service`를 한 SQL에서 함께 참조하는 diff 쿼리가 여럿 남아 있다.
-- 현재 구조는 하나의 repository 안에서 두 DB를 함께 다루는 방향으로 읽힐 여지가 있다.
-- Slice 5A는 이를 전수 제거해, 서비스 분리 이후 DB 분리 단계에서도 재사용 가능한 ETL 구조를 만드는 단계다.
+- datasource/repository/transaction boundary 분리는 현재 기준으로 완료된 것으로 본다.
+- `application.yml.sample`에 분리 datasource 설정 예시가 아직 드러나지 않아 운영 재현성 보강이 필요하다.
+- split-DB 핵심 회귀 테스트가 `integrationTest` task에만 있으므로 CI와 로컬 기본 워크플로에 반영할지 결정이 필요하다.
+- 완전히 다른 JDBC URL을 쓰는 end-to-end 검증은 아직 후속 보강 대상이다.
 - 권장 방향은 `ingest` source 추출 repository와 `service` projection repository를 분리하고, 필요 시 `service` 측 staging/temp snapshot을 도입하는 것이다.
 
 ## 2. 확정 제약사항

@@ -1,5 +1,11 @@
 package com.projectgc.calendar.service.etl
 
+import com.projectgc.calendar.repository.etl.GameCompanyProjectionRow
+import com.projectgc.calendar.repository.etl.GameLocalizationProjectionRow
+import com.projectgc.calendar.repository.etl.GameProjectionRow
+import com.projectgc.calendar.repository.etl.GameReleaseProjectionRow
+import com.projectgc.calendar.repository.etl.IngestEtlReadJdbcRepository
+import com.projectgc.calendar.repository.etl.NamedDimensionRow
 import com.projectgc.calendar.repository.etl.ServiceEtlJdbcRepository
 import com.projectgc.calendar.repository.etl.ServiceEtlSourceLogEntry
 import com.projectgc.calendar.repository.etl.ServiceEtlTableSyncResult
@@ -8,6 +14,7 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mockito.anyLong
 import org.mockito.Mockito.doAnswer
 import org.mockito.Mockito.doThrow
+import org.mockito.Mockito.inOrder
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.reset
@@ -50,25 +57,24 @@ class ServiceEtlServiceTest {
         )
     }
 
+    private val ingestRepository = mock(IngestEtlReadJdbcRepository::class.java)
     private val repository = mock(ServiceEtlJdbcRepository::class.java)
     private val affectedGameIdCalculator = mock(AffectedGameIdCalculator::class.java)
-    private val service = ServiceEtlService(
-        serviceEtlJdbcRepository = repository,
-        affectedGameIdCalculator = affectedGameIdCalculator,
-        transactionTemplate = TransactionTemplate(NoOpTransactionManager()),
-    )
+    private val service = newService(NoOpTransactionManager())
     private val sourceLogs = mutableListOf<ServiceEtlSourceLogEntry>()
     private val cursorWrites = mutableListOf<Pair<String, Long>>()
     private val finishedStatuses = mutableListOf<String>()
 
     @BeforeEach
     fun setUp() {
-        reset(repository, affectedGameIdCalculator)
+        reset(ingestRepository, repository, affectedGameIdCalculator)
         sourceLogs.clear()
         cursorWrites.clear()
         finishedStatuses.clear()
         `when`(repository.findCursor(anyObject(String::class.java))).thenReturn(null)
-        `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(emptySlice3CalculationResult())
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java)))
+            .thenReturn(emptySlice3CalculationResult())
         doAnswer { invocation ->
             sourceLogs += invocation.arguments[0] as ServiceEtlSourceLogEntry
             null
@@ -95,10 +101,10 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `syncs slice2 sources and rebuilds slice5 game projections without advancing deferred slice6 cursors`() {
-        `when`(repository.syncGameStatuses())
+    fun `syncs prepared slice2 sources and rebuilds slice5 game projections without advancing deferred slice6 cursors`() {
+        `when`(repository.syncGameStatuses(anyList()))
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 2, nextCursor = null))
-        `when`(repository.syncPlatformLogos())
+        `when`(repository.syncPlatformLogos(anyList()))
             .thenReturn(
                 ServiceEtlTableSyncResult(
                     processedRows = 1,
@@ -106,9 +112,12 @@ class ServiceEtlServiceTest {
                     note = "diff-based upsert: ingest.platform_logo has no updated_at cursor",
                 )
             )
-        `when`(repository.syncCompanies())
+        `when`(repository.syncCompanies(anyList()))
             .thenReturn(ServiceEtlTableSyncResult(processedRows = 3, nextCursor = null))
-        `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(
+            preparedAffectedGameInputs(gameIds = linkedSetOf(101L, 102L, 103L, 104L, 105L, 106L))
+        )
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
             slice3CalculationResult(
                 perTableGameIds = mapOf(
                     "game" to setOf(101L, 102L, 103L),
@@ -132,12 +141,23 @@ class ServiceEtlServiceTest {
         val runId = UUID.randomUUID()
         service.run(runId, ServiceEtlTrigger.manual())
 
-        verify(repository, never()).findCursor("game_status")
-        verify(repository, never()).findCursor("keyword")
-        verify(repository, never()).findCursor("platform_logo")
-        verify(repository, never()).findCursor("company")
-        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L, 103L, 104L, 105L, 106L))
-        verify(repository).rebuildGameDependentBridgeProjections(setOf(101L, 102L, 103L, 104L, 105L, 106L))
+        verify(affectedGameIdCalculator).prepare(anyLong())
+        verify(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+        verify(ingestRepository, never()).loadGameProjectionRows(anyLongSet())
+        verify(ingestRepository, never()).loadGameLocalizationProjectionRows(anyLongSet())
+        verify(ingestRepository, never()).loadGameReleaseProjectionRows(anyLongSet())
+        verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
+        verify(repository).rebuildGameDependentBridgeProjections(
+            anyLongSet(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
 
         assertEquals(28, sourceLogs.size)
         val logsByTable = sourceLogs.associateBy { it.tableName }
@@ -195,15 +215,57 @@ class ServiceEtlServiceTest {
 
         assertTrue(sourceLogs.none { it.status == "skipped" })
         assertEquals(emptyList(), cursorWrites)
-
         assertEquals(listOf("completed"), finishedStatuses)
     }
 
     @Test
+    fun `loads ingest snapshots before service transaction begins`() {
+        val recordingTransactionManager = RecordingTransactionManager()
+        val recordingService = newService(recordingTransactionManager)
+        val events = recordingTransactionManager.events
+        val preparedInputs = preparedAffectedGameInputs(gameIds = linkedSetOf(11L))
+
+        doAnswer {
+            events += "ingest-load-game-statuses"
+            emptyList<NamedDimensionRow>()
+        }.`when`(ingestRepository).loadGameStatuses()
+        doAnswer {
+            events += "calculator-prepare"
+            preparedInputs
+        }.`when`(affectedGameIdCalculator).prepare(anyLong())
+        doAnswer {
+            events += "service-sync-game-statuses"
+            ServiceEtlTableSyncResult(processedRows = 0, nextCursor = null)
+        }.`when`(repository).syncGameStatuses(anyList())
+        doAnswer {
+            events += "calculator-calculate"
+            emptySlice3CalculationResult()
+        }.`when`(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+        doAnswer {
+            events += "service-rebuild-core"
+            null
+        }.`when`(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
+
+        recordingService.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
+
+        val transactionBeginIndex = events.indexOf("tx-begin")
+        assertTrue(transactionBeginIndex > 0)
+        assertTrue(events.indexOf("ingest-load-game-statuses") < transactionBeginIndex)
+        assertTrue(events.indexOf("calculator-prepare") < transactionBeginIndex)
+        assertTrue(events.indexOf("service-sync-game-statuses") > transactionBeginIndex)
+        assertTrue(events.indexOf("calculator-calculate") > transactionBeginIndex)
+
+        val order = inOrder(ingestRepository, affectedGameIdCalculator, repository)
+        order.verify(ingestRepository).loadGameStatuses()
+        order.verify(affectedGameIdCalculator).prepare(anyLong())
+        order.verify(repository).syncGameStatuses(anyList())
+        order.verify(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+    }
+
+    @Test
     fun `keeps slice2 diff-based sources cursorless and logs deferred slice6 sources without cursor writes after empty slice5 rebuild`() {
-        `when`(repository.syncGameStatuses())
-            .thenReturn(ServiceEtlTableSyncResult(processedRows = 0, nextCursor = null))
-        `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
             slice3CalculationResult(
                 perTableGameIds = emptyMap(),
                 cursorFromByTable = SLICE3_SOURCE_TABLES.associateWith { 200L },
@@ -236,8 +298,18 @@ class ServiceEtlServiceTest {
         assertEquals(300L, websiteLog.cursorTo)
         assertTrue(websiteLog.note!!.contains("deferred source dry-run"))
 
-        verify(repository).rebuildCoreGameProjections(emptySet())
-        verify(repository).rebuildGameDependentBridgeProjections(emptySet())
+        verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
+        verify(repository).rebuildGameDependentBridgeProjections(
+            anyLongSet(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
         assertEquals(emptyList(), cursorWrites)
         verify(repository, never()).findCursor("game_status")
         verify(repository, never()).findCursor("platform_logo")
@@ -246,7 +318,7 @@ class ServiceEtlServiceTest {
 
     @Test
     fun `marks run failed when the first slice2 source throws`() {
-        `when`(repository.syncGameStatuses()).thenThrow(RuntimeException("game_status sync failed"))
+        `when`(repository.syncGameStatuses(anyList())).thenThrow(RuntimeException("game_status sync failed"))
 
         val runId = UUID.randomUUID()
 
@@ -257,21 +329,45 @@ class ServiceEtlServiceTest {
         assertEquals(listOf("failed"), finishedStatuses)
         assertEquals(emptyList(), cursorWrites)
         assertEquals(emptyList(), sourceLogs)
-        verify(affectedGameIdCalculator, never()).calculate(anyLong())
-        verify(repository, never()).rebuildCoreGameProjections(anyLongSet())
-        verify(repository, never()).rebuildGameDependentBridgeProjections(anyLongSet())
+        verify(affectedGameIdCalculator).prepare(anyLong())
+        verify(affectedGameIdCalculator, never()).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+        verify(repository, never()).rebuildCoreGameProjections(anyList(), anyList(), anyList())
+        verify(repository, never()).rebuildGameDependentBridgeProjections(
+            anyLongSet(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
     }
 
     @Test
     fun `marks run failed when slice5 bridge projection rebuild throws and does not advance deferred source cursors`() {
-        `when`(affectedGameIdCalculator.calculate(anyLong())).thenReturn(
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(
+            preparedAffectedGameInputs(gameIds = linkedSetOf(101L, 102L, 103L))
+        )
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
             slice3CalculationResult(
                 perTableGameIds = mapOf("game" to setOf(101L), "release_date" to setOf(102L), "involved_company" to setOf(103L)),
             )
         )
         doThrow(RuntimeException("bridge projection rebuild failed"))
             .`when`(repository)
-            .rebuildGameDependentBridgeProjections(anyLongSet())
+            .rebuildGameDependentBridgeProjections(
+                anyLongSet(),
+                anyList(),
+                anyList(),
+                anyList(),
+                anyList(),
+                anyList(),
+                anyList(),
+                anyList(),
+                anyList(),
+            )
 
         val runId = UUID.randomUUID()
 
@@ -279,8 +375,20 @@ class ServiceEtlServiceTest {
             service.run(runId, ServiceEtlTrigger.manual())
         }
 
-        verify(repository).rebuildCoreGameProjections(setOf(101L, 102L, 103L))
-        verify(repository).rebuildGameDependentBridgeProjections(setOf(101L, 102L, 103L))
+        verify(affectedGameIdCalculator).prepare(anyLong())
+        verify(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+        verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
+        verify(repository).rebuildGameDependentBridgeProjections(
+            anyLongSet(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+            anyList(),
+        )
         assertEquals(listOf("failed"), finishedStatuses)
         assertEquals(emptyList(), cursorWrites)
         assertTrue(sourceLogs.none { it.tableName in SLICE3_SOURCE_TABLES })
@@ -294,24 +402,85 @@ class ServiceEtlServiceTest {
             note = "diff-based upsert: ingest.platform_logo has no updated_at cursor",
         )
 
-        `when`(repository.syncGameStatuses()).thenReturn(emptyCursorResult)
-        `when`(repository.syncGameTypes()).thenReturn(emptyCursorResult)
-        `when`(repository.syncLanguages()).thenReturn(emptyCursorResult)
-        `when`(repository.syncRegions()).thenReturn(emptyCursorResult)
-        `when`(repository.syncReleaseRegions()).thenReturn(emptyCursorResult)
-        `when`(repository.syncReleaseStatuses()).thenReturn(emptyCursorResult)
-        `when`(repository.syncGenres()).thenReturn(emptyCursorResult)
-        `when`(repository.syncThemes()).thenReturn(emptyCursorResult)
-        `when`(repository.syncPlayerPerspectives()).thenReturn(emptyCursorResult)
-        `when`(repository.syncGameModes()).thenReturn(emptyCursorResult)
-        `when`(repository.syncKeywords()).thenReturn(emptyCursorResult)
-        `when`(repository.syncLanguageSupportTypes()).thenReturn(emptyCursorResult)
-        `when`(repository.syncWebsiteTypes()).thenReturn(emptyCursorResult)
-        `when`(repository.syncPlatformLogos()).thenReturn(emptyPlatformLogoResult)
-        `when`(repository.syncPlatformTypes()).thenReturn(emptyCursorResult)
-        `when`(repository.syncPlatforms()).thenReturn(emptyCursorResult)
-        `when`(repository.syncCompanies()).thenReturn(emptyCursorResult)
+        `when`(ingestRepository.loadGameStatuses()).thenReturn(emptyList<NamedDimensionRow>())
+        `when`(ingestRepository.loadGameTypes()).thenReturn(emptyList())
+        `when`(ingestRepository.loadLanguages()).thenReturn(emptyList())
+        `when`(ingestRepository.loadRegions()).thenReturn(emptyList())
+        `when`(ingestRepository.loadReleaseRegions()).thenReturn(emptyList())
+        `when`(ingestRepository.loadReleaseStatuses()).thenReturn(emptyList())
+        `when`(ingestRepository.loadGenres()).thenReturn(emptyList())
+        `when`(ingestRepository.loadThemes()).thenReturn(emptyList())
+        `when`(ingestRepository.loadPlayerPerspectives()).thenReturn(emptyList())
+        `when`(ingestRepository.loadGameModes()).thenReturn(emptyList())
+        `when`(ingestRepository.loadKeywords()).thenReturn(emptyList())
+        `when`(ingestRepository.loadLanguageSupportTypes()).thenReturn(emptyList())
+        `when`(ingestRepository.loadWebsiteTypes()).thenReturn(emptyList())
+        `when`(ingestRepository.loadPlatformLogos()).thenReturn(emptyList())
+        `when`(ingestRepository.loadPlatformTypes()).thenReturn(emptyList())
+        `when`(ingestRepository.loadPlatforms()).thenReturn(emptyList())
+        `when`(ingestRepository.loadCompanies()).thenReturn(emptyList())
+
+        `when`(repository.syncGameStatuses(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncGameTypes(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncLanguages(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncRegions(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncReleaseRegions(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncReleaseStatuses(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncGenres(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncThemes(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncPlayerPerspectives(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncGameModes(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncKeywords(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncLanguageSupportTypes(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncWebsiteTypes(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncPlatformLogos(anyList())).thenReturn(emptyPlatformLogoResult)
+        `when`(repository.syncPlatformTypes(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncPlatforms(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncCompanies(anyList())).thenReturn(emptyCursorResult)
     }
+
+    private fun emptyPreparedAffectedGameInputs(): PreparedAffectedGameIdInputs =
+        PreparedAffectedGameIdInputs(
+            allGameIds = emptySet(),
+            gameRows = emptyList(),
+            gameReleaseRows = emptyList(),
+            gameLocalizationRows = emptyList(),
+            gameLanguageRows = emptyList(),
+            gameGenreRows = emptyList(),
+            gameThemeRows = emptyList(),
+            gamePlayerPerspectiveRows = emptyList(),
+            gameModeRows = emptyList(),
+            gameKeywordRows = emptyList(),
+            gameCompanyRows = emptyList(),
+            gameRelationRows = emptyList(),
+            deferredSourceResults = emptyList(),
+        )
+
+    private fun preparedAffectedGameInputs(gameIds: Set<Long>): PreparedAffectedGameIdInputs =
+        PreparedAffectedGameIdInputs(
+            allGameIds = gameIds,
+            gameRows = gameIds.map(::gameRow),
+            gameReleaseRows = gameIds.map(::releaseRow),
+            gameLocalizationRows = gameIds.map(::localizationRow),
+            gameLanguageRows = emptyList(),
+            gameGenreRows = emptyList(),
+            gameThemeRows = emptyList(),
+            gamePlayerPerspectiveRows = emptyList(),
+            gameModeRows = emptyList(),
+            gameKeywordRows = emptyList(),
+            gameCompanyRows = gameIds.map { gameId ->
+                GameCompanyProjectionRow(
+                    gameId = gameId,
+                    companyId = gameId + 1000,
+                    isDeveloper = true,
+                    isPublisher = false,
+                    isPorting = false,
+                    isSupporting = false,
+                )
+            },
+            gameRelationRows = emptyList(),
+            deferredSourceResults = emptyList(),
+        )
 
     private fun emptySlice3CalculationResult(): AffectedGameIdCalculationResult =
         slice3CalculationResult(perTableGameIds = emptyMap())
@@ -345,6 +514,46 @@ class ServiceEtlServiceTest {
         )
     }
 
+    private fun gameRow(id: Long) = GameProjectionRow(
+        id = id,
+        slug = null,
+        name = "game-$id",
+        summary = null,
+        storyline = null,
+        firstReleaseDateEpochSecond = null,
+        statusId = null,
+        typeId = null,
+        sourceUpdatedAtEpochSecond = null,
+        tags = null,
+    )
+
+    private fun releaseRow(gameId: Long) = GameReleaseProjectionRow(
+        id = gameId,
+        gameId = gameId,
+        platformId = null,
+        regionId = null,
+        statusId = null,
+        releaseDateEpochSecond = null,
+        year = null,
+        month = null,
+        dateHuman = null,
+    )
+
+    private fun localizationRow(gameId: Long) = GameLocalizationProjectionRow(
+        id = gameId,
+        gameId = gameId,
+        regionId = null,
+        name = "loc-$gameId",
+    )
+
+    private fun newService(transactionManager: AbstractPlatformTransactionManager): ServiceEtlService =
+        ServiceEtlService(
+            ingestEtlReadJdbcRepository = ingestRepository,
+            serviceEtlJdbcRepository = repository,
+            affectedGameIdCalculator = affectedGameIdCalculator,
+            transactionTemplate = TransactionTemplate(transactionManager),
+        )
+
     @Suppress("UNCHECKED_CAST")
     private fun <T> anyObject(type: Class<T>): T {
         org.mockito.Mockito.any(type)
@@ -355,6 +564,12 @@ class ServiceEtlServiceTest {
     private fun anyLongSet(): Set<Long> {
         org.mockito.ArgumentMatchers.anySet<Long>()
         return emptySet()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> anyList(): List<T> {
+        org.mockito.ArgumentMatchers.anyList<T>()
+        return emptyList()
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -371,5 +586,23 @@ class ServiceEtlServiceTest {
         override fun doCommit(status: DefaultTransactionStatus) = Unit
 
         override fun doRollback(status: DefaultTransactionStatus) = Unit
+    }
+
+    private class RecordingTransactionManager : AbstractPlatformTransactionManager() {
+        val events = mutableListOf<String>()
+
+        override fun doGetTransaction(): Any = Any()
+
+        override fun doBegin(transaction: Any, definition: TransactionDefinition) {
+            events += "tx-begin"
+        }
+
+        override fun doCommit(status: DefaultTransactionStatus) {
+            events += "tx-commit"
+        }
+
+        override fun doRollback(status: DefaultTransactionStatus) {
+            events += "tx-rollback"
+        }
     }
 }

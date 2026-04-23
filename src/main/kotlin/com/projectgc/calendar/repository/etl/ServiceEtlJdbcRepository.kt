@@ -1,6 +1,7 @@
 package com.projectgc.calendar.repository.etl
 
 import com.projectgc.calendar.service.etl.ServiceEtlTrigger
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.ResultSetExtractor
 import org.springframework.stereotype.Repository
@@ -13,6 +14,7 @@ import java.util.UUID
 
 @Repository
 class ServiceEtlJdbcRepository(
+    @Qualifier("serviceJdbcTemplate")
     private val jdbc: JdbcTemplate,
 ) {
     companion object {
@@ -101,281 +103,380 @@ class ServiceEtlJdbcRepository(
         )
     }
 
-    fun findAllIngestGameIds(): List<Long> =
-        jdbc.query(
-            """
-            SELECT id
-            FROM ingest.game
-            ORDER BY id
-            """.trimIndent(),
-        ) { rs, _ -> rs.getLong("id") }
+    fun syncGameStatuses(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "game_status",
+        targetValueColumn = "status",
+    )
 
-    fun findAffectedGameIdsFromCoreGameProjectionDiff(): Set<Long> =
-        jdbc.query(
-            """
-            SELECT i.id
-            FROM ingest.game i
-            LEFT JOIN service.game s ON s.id = i.id
-            WHERE s.id IS NULL
-               OR ${differenceCondition("s.slug", "i.slug")}
-               OR ${differenceCondition("s.name", "i.name")}
-               OR ${differenceCondition("s.summary", "i.summary")}
-               OR ${differenceCondition("s.storyline", "i.storyline")}
-               OR ${differenceCondition("EXTRACT(EPOCH FROM s.first_release_date)::BIGINT", "i.first_release_date")}
-               OR ${differenceCondition("s.status_id", "i.game_status")}
-               OR ${differenceCondition("s.type_id", "i.game_type")}
-               OR ${differenceCondition("s.tags", "i.tags")}
-            ORDER BY i.id
-            """.trimIndent(),
-        ) { rs, _ -> rs.getLong("id") }.toCollection(linkedSetOf())
+    fun syncGameTypes(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "game_type",
+        targetValueColumn = "type",
+    )
 
-    fun findAffectedGameIdsFromGameBridgeProjectionDiff(): Set<Long> {
-        val affectedGameIds = linkedSetOf<Long>()
-        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
-            targetTable = "game_genre",
-            targetColumn = "genre_id",
-            sourceColumn = "genres",
-            dimensionTable = "genre",
-        )
-        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
-            targetTable = "game_theme",
-            targetColumn = "theme_id",
-            sourceColumn = "themes",
-            dimensionTable = "theme",
-        )
-        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
-            targetTable = "game_player_perspective",
-            targetColumn = "player_perspective_id",
-            sourceColumn = "player_perspectives",
-            dimensionTable = "player_perspective",
-        )
-        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
-            targetTable = "game_game_mode",
-            targetColumn = "game_mode_id",
-            sourceColumn = "game_modes",
-            dimensionTable = "game_mode",
-        )
-        affectedGameIds += findAffectedGameIdsFromGameArrayProjectionDiff(
-            targetTable = "game_keyword",
-            targetColumn = "keyword_id",
-            sourceColumn = "keywords",
-            dimensionTable = "keyword",
-        )
-        affectedGameIds += findAffectedGameIdsFromGameRelationProjectionDiff()
-        return affectedGameIds
+    fun syncLanguages(sourceRows: List<LanguageRow>): ServiceEtlTableSyncResult {
+        val existingById = loadCurrentLanguagesById()
+        val changedRows = sourceRows.filter { existingById[it.id] != it }
+        batchUpsert(
+            """
+            INSERT INTO service.language (id, locale, name, native_name)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                locale = EXCLUDED.locale,
+                name = EXCLUDED.name,
+                native_name = EXCLUDED.native_name
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.locale)
+            setNullableString(3, row.name)
+            setNullableString(4, row.nativeName)
+        }
+        return diffResult(changedRows.size)
     }
 
-    fun findAffectedGameIdsFromGameReleaseProjectionDiff(): Set<Long> =
-        jdbc.query(
+    fun syncRegions(sourceRows: List<RegionRow>): ServiceEtlTableSyncResult {
+        val existingById = loadCurrentRegionsById()
+        val changedRows = sourceRows.filter { existingById[it.id] != it }
+        batchUpsert(
             """
-            SELECT DISTINCT game_id
-            FROM (
-                SELECT i.game AS game_id
-                FROM ingest.release_date i
-                LEFT JOIN service.game_release s ON s.id = i.id
-                WHERE i.game IS NOT NULL
-                  AND (
-                      s.id IS NULL
-                      OR ${differenceCondition("s.game_id", "i.game")}
-                      OR ${differenceCondition("s.platform_id", "i.platform")}
-                      OR ${differenceCondition("s.region_id", "i.release_region")}
-                      OR ${differenceCondition("s.status_id", "i.status")}
-                      OR ${differenceCondition("EXTRACT(EPOCH FROM s.release_date)::BIGINT", "i.date")}
-                      OR ${differenceCondition("s.year", "i.y")}
-                      OR ${differenceCondition("s.month", "i.m")}
-                      OR ${differenceCondition("s.date_human", "i.human")}
-                  )
-                UNION
-                SELECT s.game_id AS game_id
-                FROM service.game_release s
-                LEFT JOIN ingest.release_date i ON i.id = s.id
-                WHERE s.game_id IS NOT NULL
-                  AND (
-                      i.id IS NULL
-                      OR ${differenceCondition("s.game_id", "i.game")}
-                      OR ${differenceCondition("s.platform_id", "i.platform")}
-                      OR ${differenceCondition("s.region_id", "i.release_region")}
-                      OR ${differenceCondition("s.status_id", "i.status")}
-                      OR ${differenceCondition("EXTRACT(EPOCH FROM s.release_date)::BIGINT", "i.date")}
-                      OR ${differenceCondition("s.year", "i.y")}
-                      OR ${differenceCondition("s.month", "i.m")}
-                      OR ${differenceCondition("s.date_human", "i.human")}
-                  )
-            ) affected
-            ORDER BY game_id
+            INSERT INTO service.region (id, name, identifier)
+            VALUES (?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                identifier = EXCLUDED.identifier
             """.trimIndent(),
-        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.name)
+            setNullableString(3, row.identifier)
+        }
+        return diffResult(changedRows.size)
+    }
 
-    fun findAffectedGameIdsFromGames(cursorFrom: Long): Set<Long> =
+    fun syncReleaseRegions(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "release_region",
+        targetValueColumn = "name",
+    )
+
+    fun syncReleaseStatuses(sourceRows: List<ReleaseStatusRow>): ServiceEtlTableSyncResult {
+        val existingById = loadCurrentReleaseStatusesById()
+        val changedRows = sourceRows.filter { existingById[it.id] != it }
+        batchUpsert(
+            """
+            INSERT INTO service.release_status (id, name, description)
+            VALUES (?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.name)
+            setNullableString(3, row.description)
+        }
+        return diffResult(changedRows.size)
+    }
+
+    fun syncGenres(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "genre",
+        targetValueColumn = "name",
+    )
+
+    fun syncThemes(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "theme",
+        targetValueColumn = "name",
+    )
+
+    fun syncPlayerPerspectives(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "player_perspective",
+        targetValueColumn = "name",
+    )
+
+    fun syncGameModes(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "game_mode",
+        targetValueColumn = "name",
+    )
+
+    fun syncKeywords(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "keyword",
+        targetValueColumn = "name",
+    )
+
+    fun syncLanguageSupportTypes(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "language_support_type",
+        targetValueColumn = "name",
+    )
+
+    fun syncWebsiteTypes(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "website_type",
+        targetValueColumn = "type",
+    )
+
+    fun syncPlatformLogos(sourceRows: List<PlatformLogoRow>): ServiceEtlTableSyncResult {
+        val existingById = loadCurrentPlatformLogosById()
+        val changedRows = sourceRows.filter { existingById[it.id] != it }
+        batchUpsert(
+            """
+            INSERT INTO service.platform_logo (id, image_id, url)
+            VALUES (?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                image_id = EXCLUDED.image_id,
+                url = EXCLUDED.url
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.imageId)
+            setNullableString(3, row.url)
+        }
+        return diffResult(changedRows.size, note = PLATFORM_LOGO_NOTE)
+    }
+
+    fun syncPlatformTypes(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
+        sourceRows = sourceRows,
+        targetTable = "platform_type",
+        targetValueColumn = "name",
+    )
+
+    fun syncPlatforms(sourceRows: List<PlatformSyncRow>): ServiceEtlTableSyncResult {
+        val resolvedRows = resolvePlatformReferences(
+            rows = sourceRows,
+            availableLogoIds = loadIds("service.platform_logo"),
+            availableTypeIds = loadIds("service.platform_type"),
+        )
+        val existingById = loadCurrentPlatformsById()
+        val changedRows = resolvedRows.filter { existingById[it.id] != it }
+
+        batchUpsert(
+            """
+            INSERT INTO service.platform (id, name, abbreviation, alternative_name, logo_id, type_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                abbreviation = EXCLUDED.abbreviation,
+                alternative_name = EXCLUDED.alternative_name,
+                logo_id = EXCLUDED.logo_id,
+                type_id = EXCLUDED.type_id
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.name)
+            setNullableString(3, row.abbreviation)
+            setNullableString(4, row.alternativeName)
+            setNullableLong(5, row.logoId)
+            setNullableLong(6, row.typeId)
+        }
+        return diffResult(changedRows.size)
+    }
+
+    fun syncCompanies(sourceRows: List<CompanySyncRow>): ServiceEtlTableSyncResult {
+        val resolvedRows = resolveCompanyReferences(sourceRows)
+        val existingById = loadCurrentCompaniesById()
+        val changedRows = resolvedRows.filter { existingById[it.id] != it }
+
+        batchUpsert(
+            """
+            INSERT INTO service.company (id, name, parent_company_id, merged_into_company_id)
+            VALUES (?, ?, NULL, NULL)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.name)
+        }
+        batchUpsert(
+            """
+            UPDATE service.company
+            SET parent_company_id = ?, merged_into_company_id = ?
+            WHERE id = ?
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setNullableLong(1, row.parentCompanyId)
+            setNullableLong(2, row.mergedIntoCompanyId)
+            setLong(3, row.id)
+        }
+        return diffResult(changedRows.size)
+    }
+
+    fun loadIds(tableName: String): Set<Long> =
+        jdbc.query("SELECT id FROM $tableName") { rs, _ -> rs.getLong("id") }.toSet()
+
+    fun loadCurrentGameProjectionRows(): List<GameProjectionRow> =
         jdbc.query(
             """
-            SELECT id
-            FROM ingest.game
-            WHERE updated_at > ?
+            SELECT
+                id,
+                slug,
+                name,
+                summary,
+                storyline,
+                EXTRACT(EPOCH FROM first_release_date)::BIGINT AS first_release_date,
+                status_id,
+                type_id,
+                EXTRACT(EPOCH FROM source_updated_at)::BIGINT AS source_updated_at,
+                tags
+            FROM service.game
             ORDER BY id
             """.trimIndent(),
-            { rs, _ -> rs.getLong("id") },
-            cursorFrom,
-        ).toCollection(linkedSetOf())
-
-    fun findAffectedGameIdsFromReleaseDates(cursorFrom: Long): Set<Long> =
-        findDistinctGameIdsByUpdatedAt("release_date", cursorFrom)
-
-    fun findAffectedGameIdsFromInvolvedCompanies(cursorFrom: Long): Set<Long> =
-        findDistinctGameIdsByUpdatedAt("involved_company", cursorFrom)
-
-    fun findAffectedGameIdsFromInvolvedCompanyProjectionDiff(): Set<Long> =
-        jdbc.query(
-            """
-            WITH source_rows AS (
-                SELECT
-                    ic.game AS game_id,
-                    ic.company AS company_id,
-                    bool_or(COALESCE(ic.developer, FALSE)) AS is_developer,
-                    bool_or(COALESCE(ic.publisher, FALSE)) AS is_publisher,
-                    bool_or(COALESCE(ic.porting, FALSE)) AS is_porting,
-                    bool_or(COALESCE(ic.supporting, FALSE)) AS is_supporting
-                FROM ingest.involved_company ic
-                JOIN service.game sg ON sg.id = ic.game
-                JOIN service.company sc ON sc.id = ic.company
-                WHERE ic.game IS NOT NULL
-                  AND ic.company IS NOT NULL
-                GROUP BY ic.game, ic.company
-                HAVING bool_or(COALESCE(ic.developer, FALSE))
-                    OR bool_or(COALESCE(ic.publisher, FALSE))
-                    OR bool_or(COALESCE(ic.porting, FALSE))
-                    OR bool_or(COALESCE(ic.supporting, FALSE))
+        ) { rs, _ ->
+            GameProjectionRow(
+                id = rs.getLong("id"),
+                slug = rs.getString("slug"),
+                name = rs.getString("name"),
+                summary = rs.getString("summary"),
+                storyline = rs.getString("storyline"),
+                firstReleaseDateEpochSecond = rs.getLong("first_release_date").takeIf { !rs.wasNull() },
+                statusId = rs.getLong("status_id").takeIf { !rs.wasNull() },
+                typeId = rs.getLong("type_id").takeIf { !rs.wasNull() },
+                sourceUpdatedAtEpochSecond = rs.getLong("source_updated_at").takeIf { !rs.wasNull() },
+                tags = rs.getNullableLongList("tags"),
             )
-            SELECT DISTINCT game_id
-            FROM (
-                SELECT src.game_id
-                FROM source_rows src
-                LEFT JOIN service.game_company s
-                  ON s.game_id = src.game_id
-                 AND s.company_id = src.company_id
-                WHERE s.game_id IS NULL
-                   OR ${differenceCondition("s.is_developer", "src.is_developer")}
-                   OR ${differenceCondition("s.is_publisher", "src.is_publisher")}
-                   OR ${differenceCondition("s.is_porting", "src.is_porting")}
-                   OR ${differenceCondition("s.is_supporting", "src.is_supporting")}
-                UNION
-                SELECT s.game_id
-                FROM service.game_company s
-                JOIN ingest.game g ON g.id = s.game_id
-                LEFT JOIN source_rows src
-                  ON src.game_id = s.game_id
-                 AND src.company_id = s.company_id
-                WHERE src.game_id IS NULL
-                   OR ${differenceCondition("s.is_developer", "src.is_developer")}
-                   OR ${differenceCondition("s.is_publisher", "src.is_publisher")}
-                   OR ${differenceCondition("s.is_porting", "src.is_porting")}
-                   OR ${differenceCondition("s.is_supporting", "src.is_supporting")}
-            ) affected
-            ORDER BY game_id
-            """.trimIndent(),
-        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+        }
 
-    fun findAffectedGameIdsFromLanguageSupports(cursorFrom: Long): Set<Long> =
-        findDistinctGameIdsByUpdatedAt("language_support", cursorFrom)
-
-    fun findAffectedGameIdsFromLanguageSupportProjectionDiff(): Set<Long> =
+    fun loadCurrentGameReleaseProjectionRows(): List<GameReleaseProjectionRow> =
         jdbc.query(
             """
-            WITH grouped_rows AS (
-                SELECT
-                    ls.game AS game_id,
-                    ls.language AS language_id,
-                    bool_or(lower(COALESCE(lst.name, '')) = 'audio') AS supports_audio,
-                    bool_or(lower(COALESCE(lst.name, '')) IN ('subtitles', 'subtitle')) AS supports_subtitles,
-                    bool_or(lower(COALESCE(lst.name, '')) = 'interface') AS supports_interface
-                FROM ingest.language_support ls
-                JOIN service.game sg ON sg.id = ls.game
-                JOIN service.language sl ON sl.id = ls.language
-                LEFT JOIN ingest.language_support_type lst ON lst.id = ls.language_support_type
-                WHERE ls.game IS NOT NULL
-                  AND ls.language IS NOT NULL
-                GROUP BY ls.game, ls.language
-            ),
-            source_rows AS (
-                SELECT *
-                FROM grouped_rows
-                WHERE supports_audio OR supports_subtitles OR supports_interface
+            SELECT
+                id,
+                game_id,
+                platform_id,
+                region_id,
+                status_id,
+                EXTRACT(EPOCH FROM release_date)::BIGINT AS release_date,
+                year,
+                month,
+                date_human
+            FROM service.game_release
+            ORDER BY game_id, id
+            """.trimIndent(),
+        ) { rs, _ ->
+            GameReleaseProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                platformId = rs.getLong("platform_id").takeIf { !rs.wasNull() },
+                regionId = rs.getLong("region_id").takeIf { !rs.wasNull() },
+                statusId = rs.getLong("status_id").takeIf { !rs.wasNull() },
+                releaseDateEpochSecond = rs.getLong("release_date").takeIf { !rs.wasNull() },
+                year = rs.getInt("year").takeIf { !rs.wasNull() },
+                month = rs.getInt("month").takeIf { !rs.wasNull() },
+                dateHuman = rs.getString("date_human"),
             )
-            SELECT DISTINCT game_id
-            FROM (
-                SELECT src.game_id
-                FROM source_rows src
-                LEFT JOIN service.game_language s
-                  ON s.game_id = src.game_id
-                 AND s.language_id = src.language_id
-                WHERE s.game_id IS NULL
-                   OR ${differenceCondition("s.supports_audio", "src.supports_audio")}
-                   OR ${differenceCondition("s.supports_subtitles", "src.supports_subtitles")}
-                   OR ${differenceCondition("s.supports_interface", "src.supports_interface")}
-                UNION
-                SELECT s.game_id
-                FROM service.game_language s
-                JOIN ingest.game g ON g.id = s.game_id
-                LEFT JOIN source_rows src
-                  ON src.game_id = s.game_id
-                 AND src.language_id = s.language_id
-                WHERE src.game_id IS NULL
-                   OR ${differenceCondition("s.supports_audio", "src.supports_audio")}
-                   OR ${differenceCondition("s.supports_subtitles", "src.supports_subtitles")}
-                   OR ${differenceCondition("s.supports_interface", "src.supports_interface")}
-            ) affected
-            ORDER BY game_id
-            """.trimIndent(),
-        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+        }
 
-    fun findAffectedGameIdsFromGameLocalizationProjectionDiff(): Set<Long> =
+    fun loadCurrentGameLocalizationProjectionRows(): List<GameLocalizationProjectionRow> =
         jdbc.query(
             """
-            SELECT DISTINCT game_id
-            FROM (
-                SELECT i.game AS game_id
-                FROM ingest.game_localization i
-                LEFT JOIN service.game_localization s ON s.id = i.id
-                WHERE i.game IS NOT NULL
-                  AND (
-                      s.id IS NULL
-                      OR ${differenceCondition("s.game_id", "i.game")}
-                      OR ${differenceCondition("s.region_id", "i.region")}
-                      OR ${differenceCondition("s.name", "i.name")}
-                  )
-                UNION
-                SELECT s.game_id AS game_id
-                FROM service.game_localization s
-                LEFT JOIN ingest.game_localization i ON i.id = s.id
-                WHERE s.game_id IS NOT NULL
-                  AND (
-                      i.id IS NULL
-                      OR ${differenceCondition("s.game_id", "i.game")}
-                      OR ${differenceCondition("s.region_id", "i.region")}
-                      OR ${differenceCondition("s.name", "i.name")}
-                  )
-            ) affected
-            ORDER BY game_id
+            SELECT id, game_id, region_id, name
+            FROM service.game_localization
+            ORDER BY game_id, id
             """.trimIndent(),
-        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
+        ) { rs, _ ->
+            GameLocalizationProjectionRow(
+                id = rs.getLong("id"),
+                gameId = rs.getLong("game_id"),
+                regionId = rs.getLong("region_id").takeIf { !rs.wasNull() },
+                name = rs.getString("name"),
+            )
+        }
 
-    fun findAffectedGameIdsFromGameLocalizations(cursorFrom: Long): Set<Long> =
-        findDistinctGameIdsByUpdatedAt("game_localization", cursorFrom)
+    fun loadCurrentGameLanguageProjectionRows(): List<GameLanguageProjectionRow> =
+        jdbc.query(
+            """
+            SELECT game_id, language_id, supports_audio, supports_subtitles, supports_interface
+            FROM service.game_language
+            ORDER BY game_id, language_id
+            """.trimIndent(),
+        ) { rs, _ ->
+            GameLanguageProjectionRow(
+                gameId = rs.getLong("game_id"),
+                languageId = rs.getLong("language_id"),
+                supportsAudio = rs.getBoolean("supports_audio"),
+                supportsSubtitles = rs.getBoolean("supports_subtitles"),
+                supportsInterface = rs.getBoolean("supports_interface"),
+            )
+        }
 
-    fun findAffectedGameIdsFromGameUpdatedAt(cursorFrom: Long): Set<Long> =
-        findAffectedGameIdsFromGames(cursorFrom)
+    fun loadCurrentGameDimensionProjectionRows(
+        tableName: String,
+        targetColumn: String,
+    ): List<GameDimensionProjectionRow> =
+        jdbc.query(
+            """
+            SELECT game_id, $targetColumn AS dimension_id
+            FROM service.$tableName
+            ORDER BY game_id, dimension_id
+            """.trimIndent(),
+        ) { rs, _ ->
+            GameDimensionProjectionRow(
+                gameId = rs.getLong("game_id"),
+                dimensionId = rs.getLong("dimension_id"),
+            )
+        }
 
-    fun rebuildCoreGameProjections(affectedGameIds: Set<Long>) {
-        val sourceGameRows = loadGameProjectionRows(affectedGameIds)
-        val materializedGameIds = sourceGameRows.mapTo(linkedSetOf()) { it.id }
+    fun loadCurrentGameCompanyProjectionRows(): List<GameCompanyProjectionRow> =
+        jdbc.query(
+            """
+            SELECT game_id, company_id, is_developer, is_publisher, is_porting, is_supporting
+            FROM service.game_company
+            ORDER BY game_id, company_id
+            """.trimIndent(),
+        ) { rs, _ ->
+            GameCompanyProjectionRow(
+                gameId = rs.getLong("game_id"),
+                companyId = rs.getLong("company_id"),
+                isDeveloper = rs.getBoolean("is_developer"),
+                isPublisher = rs.getBoolean("is_publisher"),
+                isPorting = rs.getBoolean("is_porting"),
+                isSupporting = rs.getBoolean("is_supporting"),
+            )
+        }
+
+    fun loadCurrentGameRelationProjectionRows(): List<GameRelationProjectionRow> =
+        jdbc.query(
+            """
+            SELECT game_id, related_game_id, relation_type
+            FROM service.game_relation
+            ORDER BY game_id, relation_type, related_game_id
+            """.trimIndent(),
+        ) { rs, _ ->
+            GameRelationProjectionRow(
+                gameId = rs.getLong("game_id"),
+                relatedGameId = rs.getLong("related_game_id"),
+                relationType = rs.getString("relation_type"),
+            )
+        }
+
+    fun rebuildCoreGameProjections(
+        gameRows: List<GameProjectionRow>,
+        gameLocalizationRows: List<GameLocalizationProjectionRow>,
+        gameReleaseRows: List<GameReleaseProjectionRow>,
+    ) {
+        val materializedGameIds = gameRows.mapTo(linkedSetOf()) { it.id }
         if (materializedGameIds.isEmpty()) {
             return
         }
 
         val resolvedGameRows = resolveGameReferences(
-            rows = sourceGameRows,
-            availableStatusIds = loadIdSet("service.game_status"),
-            availableTypeIds = loadIdSet("service.game_type"),
+            rows = gameRows,
+            availableStatusIds = loadIds("service.game_status"),
+            availableTypeIds = loadIds("service.game_type"),
         )
         batchUpsert(
             """
@@ -409,17 +510,17 @@ class ServiceEtlJdbcRepository(
         }
 
         deleteByGameIds("service.game_localization", materializedGameIds)
-        val gameLocalizationRows = resolveGameLocalizationReferences(
-            rows = loadGameLocalizationProjectionRows(materializedGameIds),
+        val resolvedGameLocalizationRows = resolveGameLocalizationReferences(
+            rows = gameLocalizationRows,
             availableGameIds = materializedGameIds,
-            availableRegionIds = loadIdSet("service.region"),
+            availableRegionIds = loadIds("service.region"),
         )
         batchUpsert(
             """
             INSERT INTO service.game_localization (id, game_id, region_id, name)
             VALUES (?, ?, ?, ?)
             """.trimIndent(),
-            gameLocalizationRows,
+            resolvedGameLocalizationRows,
         ) { row ->
             setLong(1, row.id)
             setLong(2, row.gameId)
@@ -428,12 +529,12 @@ class ServiceEtlJdbcRepository(
         }
 
         deleteByGameIds("service.game_release", materializedGameIds)
-        val gameReleaseRows = resolveGameReleaseReferences(
-            rows = loadGameReleaseProjectionRows(materializedGameIds),
+        val resolvedGameReleaseRows = resolveGameReleaseReferences(
+            rows = gameReleaseRows,
             availableGameIds = materializedGameIds,
-            availablePlatformIds = loadIdSet("service.platform"),
-            availableRegionIds = loadIdSet("service.release_region"),
-            availableStatusIds = loadIdSet("service.release_status"),
+            availablePlatformIds = loadIds("service.platform"),
+            availableRegionIds = loadIds("service.release_region"),
+            availableStatusIds = loadIds("service.release_status"),
         )
         batchUpsert(
             """
@@ -441,7 +542,7 @@ class ServiceEtlJdbcRepository(
                 (id, game_id, platform_id, region_id, status_id, release_date, year, month, date_human)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
-            gameReleaseRows,
+            resolvedGameReleaseRows,
         ) { row ->
             setLong(1, row.id)
             setLong(2, row.gameId)
@@ -455,19 +556,28 @@ class ServiceEtlJdbcRepository(
         }
     }
 
-    fun rebuildGameDependentBridgeProjections(affectedGameIds: Set<Long>) {
-        val materializedGameIds = loadExistingIngestGameIds(affectedGameIds)
+    fun rebuildGameDependentBridgeProjections(
+        materializedGameIds: Set<Long>,
+        gameLanguageRows: List<GameLanguageProjectionRow>,
+        gameGenreRows: List<GameDimensionProjectionRow>,
+        gameThemeRows: List<GameDimensionProjectionRow>,
+        gamePlayerPerspectiveRows: List<GameDimensionProjectionRow>,
+        gameModeRows: List<GameDimensionProjectionRow>,
+        gameKeywordRows: List<GameDimensionProjectionRow>,
+        gameCompanyRows: List<GameCompanyProjectionRow>,
+        gameRelationRows: List<GameRelationProjectionRow>,
+    ) {
         if (materializedGameIds.isEmpty()) {
             return
         }
 
-        val availableGameIds = loadIdSet("service.game")
+        val availableGameIds = loadIds("service.game")
 
         deleteByGameIds("service.game_language", materializedGameIds)
-        val gameLanguageRows = resolveGameLanguageReferences(
-            rows = loadGameLanguageProjectionRows(materializedGameIds),
+        val resolvedGameLanguageRows = resolveGameLanguageReferences(
+            rows = gameLanguageRows,
             availableGameIds = availableGameIds,
-            availableLanguageIds = loadIdSet("service.language"),
+            availableLanguageIds = loadIds("service.language"),
         )
         batchUpsert(
             """
@@ -475,7 +585,7 @@ class ServiceEtlJdbcRepository(
                 (game_id, language_id, supports_audio, supports_subtitles, supports_interface)
             VALUES (?, ?, ?, ?, ?)
             """.trimIndent(),
-            gameLanguageRows,
+            resolvedGameLanguageRows,
         ) { row ->
             setLong(1, row.gameId)
             setLong(2, row.languageId)
@@ -486,50 +596,50 @@ class ServiceEtlJdbcRepository(
 
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_genre",
-            materializedGameIds = materializedGameIds,
-            availableGameIds = availableGameIds,
-            availableDimensionIds = loadIdSet("service.genre"),
-            sourceColumn = "genres",
             targetColumn = "genre_id",
+            materializedGameIds = materializedGameIds,
+            sourceRows = gameGenreRows,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIds("service.genre"),
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_theme",
-            materializedGameIds = materializedGameIds,
-            availableGameIds = availableGameIds,
-            availableDimensionIds = loadIdSet("service.theme"),
-            sourceColumn = "themes",
             targetColumn = "theme_id",
+            materializedGameIds = materializedGameIds,
+            sourceRows = gameThemeRows,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIds("service.theme"),
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_player_perspective",
-            materializedGameIds = materializedGameIds,
-            availableGameIds = availableGameIds,
-            availableDimensionIds = loadIdSet("service.player_perspective"),
-            sourceColumn = "player_perspectives",
             targetColumn = "player_perspective_id",
+            materializedGameIds = materializedGameIds,
+            sourceRows = gamePlayerPerspectiveRows,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIds("service.player_perspective"),
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_game_mode",
-            materializedGameIds = materializedGameIds,
-            availableGameIds = availableGameIds,
-            availableDimensionIds = loadIdSet("service.game_mode"),
-            sourceColumn = "game_modes",
             targetColumn = "game_mode_id",
+            materializedGameIds = materializedGameIds,
+            sourceRows = gameModeRows,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIds("service.game_mode"),
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_keyword",
-            materializedGameIds = materializedGameIds,
-            availableGameIds = availableGameIds,
-            availableDimensionIds = loadIdSet("service.keyword"),
-            sourceColumn = "keywords",
             targetColumn = "keyword_id",
+            materializedGameIds = materializedGameIds,
+            sourceRows = gameKeywordRows,
+            availableGameIds = availableGameIds,
+            availableDimensionIds = loadIds("service.keyword"),
         )
 
         deleteByGameIds("service.game_company", materializedGameIds)
-        val gameCompanyRows = resolveGameCompanyReferences(
-            rows = loadGameCompanyProjectionRows(materializedGameIds),
+        val resolvedGameCompanyRows = resolveGameCompanyReferences(
+            rows = gameCompanyRows,
             availableGameIds = availableGameIds,
-            availableCompanyIds = loadIdSet("service.company"),
+            availableCompanyIds = loadIds("service.company"),
         )
         batchUpsert(
             """
@@ -537,7 +647,7 @@ class ServiceEtlJdbcRepository(
                 (game_id, company_id, is_developer, is_publisher, is_porting, is_supporting)
             VALUES (?, ?, ?, ?, ?, ?)
             """.trimIndent(),
-            gameCompanyRows,
+            resolvedGameCompanyRows,
         ) { row ->
             setLong(1, row.gameId)
             setLong(2, row.companyId)
@@ -548,8 +658,8 @@ class ServiceEtlJdbcRepository(
         }
 
         deleteByGameIds("service.game_relation", materializedGameIds)
-        val gameRelationRows = resolveGameRelationReferences(
-            rows = loadGameRelationProjectionRows(materializedGameIds),
+        val resolvedGameRelationRows = resolveGameRelationReferences(
+            rows = gameRelationRows,
             availableGameIds = availableGameIds,
         )
         batchUpsert(
@@ -557,7 +667,7 @@ class ServiceEtlJdbcRepository(
             INSERT INTO service.game_relation (game_id, related_game_id, relation_type)
             VALUES (?, ?, ?)
             """.trimIndent(),
-            gameRelationRows,
+            resolvedGameRelationRows,
         ) { row ->
             setLong(1, row.gameId)
             setLong(2, row.relatedGameId)
@@ -565,31 +675,44 @@ class ServiceEtlJdbcRepository(
         }
     }
 
-    fun syncGameStatuses() = syncNamedDimensionByDiff(
-        sourceTable = "game_status",
-        sourceValueColumn = "status",
-        targetTable = "game_status",
-        targetValueColumn = "status",
-    )
-
-    fun syncGameTypes() = syncNamedDimensionByDiff(
-        sourceTable = "game_type",
-        sourceValueColumn = "type",
-        targetTable = "game_type",
-        targetValueColumn = "type",
-    )
-
-    fun syncLanguages(): ServiceEtlTableSyncResult {
-        val rows = jdbc.query(
+    private fun syncNamedDimensionByDiff(
+        sourceRows: List<NamedDimensionRow>,
+        targetTable: String,
+        targetValueColumn: String,
+    ): ServiceEtlTableSyncResult {
+        val existingById = jdbc.query(
             """
-            SELECT i.id, i.locale, i.name, i.native_name
-            FROM ingest.language i
-            LEFT JOIN service.language s ON s.id = i.id
-            WHERE s.id IS NULL
-               OR ${differenceCondition("s.locale", "i.locale")}
-               OR ${differenceCondition("s.name", "i.name")}
-               OR ${differenceCondition("s.native_name", "i.native_name")}
-            ORDER BY i.id
+            SELECT id, $targetValueColumn AS value
+            FROM service.$targetTable
+            """.trimIndent(),
+        ) { rs, _ ->
+            NamedDimensionRow(
+                id = rs.getLong("id"),
+                value = rs.getString("value"),
+            )
+        }.associateBy { it.id }
+        val changedRows = sourceRows.filter { existingById[it.id] != it }
+
+        batchUpsert(
+            """
+            INSERT INTO service.$targetTable (id, $targetValueColumn)
+            VALUES (?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                $targetValueColumn = EXCLUDED.$targetValueColumn
+            """.trimIndent(),
+            changedRows,
+        ) { row ->
+            setLong(1, row.id)
+            setNullableString(2, row.value)
+        }
+        return diffResult(changedRows.size)
+    }
+
+    private fun loadCurrentLanguagesById(): Map<Long, LanguageRow> =
+        jdbc.query(
+            """
+            SELECT id, locale, name, native_name
+            FROM service.language
             """.trimIndent(),
         ) { rs, _ ->
             LanguageRow(
@@ -598,36 +721,13 @@ class ServiceEtlJdbcRepository(
                 name = rs.getString("name"),
                 nativeName = rs.getString("native_name"),
             )
-        }
-        batchUpsert(
-            """
-            INSERT INTO service.language (id, locale, name, native_name)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                locale = EXCLUDED.locale,
-                name = EXCLUDED.name,
-                native_name = EXCLUDED.native_name
-            """.trimIndent(),
-            rows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.locale)
-            setNullableString(3, row.name)
-            setNullableString(4, row.nativeName)
-        }
-        return diffResult(rows.size)
-    }
+        }.associateBy { it.id }
 
-    fun syncRegions(): ServiceEtlTableSyncResult {
-        val rows = jdbc.query(
+    private fun loadCurrentRegionsById(): Map<Long, RegionRow> =
+        jdbc.query(
             """
-            SELECT i.id, i.name, i.identifier
-            FROM ingest.region i
-            LEFT JOIN service.region s ON s.id = i.id
-            WHERE s.id IS NULL
-               OR ${differenceCondition("s.name", "i.name")}
-               OR ${differenceCondition("s.identifier", "i.identifier")}
-            ORDER BY i.id
+            SELECT id, name, identifier
+            FROM service.region
             """.trimIndent(),
         ) { rs, _ ->
             RegionRow(
@@ -635,41 +735,13 @@ class ServiceEtlJdbcRepository(
                 name = rs.getString("name"),
                 identifier = rs.getString("identifier"),
             )
-        }
-        batchUpsert(
-            """
-            INSERT INTO service.region (id, name, identifier)
-            VALUES (?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                identifier = EXCLUDED.identifier
-            """.trimIndent(),
-            rows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.name)
-            setNullableString(3, row.identifier)
-        }
-        return diffResult(rows.size)
-    }
+        }.associateBy { it.id }
 
-    fun syncReleaseRegions() = syncNamedDimensionByDiff(
-        sourceTable = "release_date_region",
-        sourceValueColumn = "region",
-        targetTable = "release_region",
-        targetValueColumn = "name",
-    )
-
-    fun syncReleaseStatuses(): ServiceEtlTableSyncResult {
-        val rows = jdbc.query(
+    private fun loadCurrentReleaseStatusesById(): Map<Long, ReleaseStatusRow> =
+        jdbc.query(
             """
-            SELECT i.id, i.name, i.description
-            FROM ingest.release_date_status i
-            LEFT JOIN service.release_status s ON s.id = i.id
-            WHERE s.id IS NULL
-               OR ${differenceCondition("s.name", "i.name")}
-               OR ${differenceCondition("s.description", "i.description")}
-            ORDER BY i.id
+            SELECT id, name, description
+            FROM service.release_status
             """.trimIndent(),
         ) { rs, _ ->
             ReleaseStatusRow(
@@ -677,83 +749,13 @@ class ServiceEtlJdbcRepository(
                 name = rs.getString("name"),
                 description = rs.getString("description"),
             )
-        }
-        batchUpsert(
+        }.associateBy { it.id }
+
+    private fun loadCurrentPlatformLogosById(): Map<Long, PlatformLogoRow> =
+        jdbc.query(
             """
-            INSERT INTO service.release_status (id, name, description)
-            VALUES (?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                description = EXCLUDED.description
-            """.trimIndent(),
-            rows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.name)
-            setNullableString(3, row.description)
-        }
-        return diffResult(rows.size)
-    }
-
-    fun syncGenres() = syncNamedDimensionByDiff(
-        sourceTable = "genre",
-        sourceValueColumn = "name",
-        targetTable = "genre",
-        targetValueColumn = "name",
-    )
-
-    fun syncThemes() = syncNamedDimensionByDiff(
-        sourceTable = "theme",
-        sourceValueColumn = "name",
-        targetTable = "theme",
-        targetValueColumn = "name",
-    )
-
-    fun syncPlayerPerspectives() = syncNamedDimensionByDiff(
-        sourceTable = "player_perspective",
-        sourceValueColumn = "name",
-        targetTable = "player_perspective",
-        targetValueColumn = "name",
-    )
-
-    fun syncGameModes() = syncNamedDimensionByDiff(
-        sourceTable = "game_mode",
-        sourceValueColumn = "name",
-        targetTable = "game_mode",
-        targetValueColumn = "name",
-    )
-
-    fun syncKeywords() = syncNamedDimensionByDiff(
-        sourceTable = "keyword",
-        sourceValueColumn = "name",
-        targetTable = "keyword",
-        targetValueColumn = "name",
-    )
-
-    fun syncLanguageSupportTypes() = syncNamedDimensionByDiff(
-        sourceTable = "language_support_type",
-        sourceValueColumn = "name",
-        targetTable = "language_support_type",
-        targetValueColumn = "name",
-    )
-
-    fun syncWebsiteTypes() = syncNamedDimensionByDiff(
-        sourceTable = "website_type",
-        sourceValueColumn = "type",
-        targetTable = "website_type",
-        targetValueColumn = "type",
-    )
-
-    fun syncPlatformLogos(): ServiceEtlTableSyncResult {
-        val rows = jdbc.query(
-            """
-            SELECT i.id, i.image_id, i.url
-            FROM ingest.platform_logo i
-            LEFT JOIN service.platform_logo s ON s.id = i.id
-            WHERE s.id IS NULL
-               OR ${differenceCondition("s.image_id", "i.image_id")}
-               OR ${differenceCondition("s.url", "i.url")}
-            ORDER BY i.id
+            SELECT id, image_id, url
+            FROM service.platform_logo
             """.trimIndent(),
         ) { rs, _ ->
             PlatformLogoRow(
@@ -761,54 +763,10 @@ class ServiceEtlJdbcRepository(
                 imageId = rs.getString("image_id"),
                 url = rs.getString("url"),
             )
-        }
-        batchUpsert(
-            """
-            INSERT INTO service.platform_logo (id, image_id, url)
-            VALUES (?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                image_id = EXCLUDED.image_id,
-                url = EXCLUDED.url
-            """.trimIndent(),
-            rows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.imageId)
-            setNullableString(3, row.url)
-        }
-        return diffResult(rows.size, note = PLATFORM_LOGO_NOTE)
-    }
+        }.associateBy { it.id }
 
-    fun syncPlatformTypes() = syncNamedDimensionByDiff(
-        sourceTable = "platform_type",
-        sourceValueColumn = "name",
-        targetTable = "platform_type",
-        targetValueColumn = "name",
-    )
-
-    fun syncPlatforms(): ServiceEtlTableSyncResult {
-        val sourceRows = jdbc.query(
-            """
-            SELECT id, name, abbreviation, alternative_name, platform_logo, platform_type
-            FROM ingest.platform
-            ORDER BY id
-            """.trimIndent(),
-        ) { rs, _ ->
-            PlatformSyncRow(
-                id = rs.getLong("id"),
-                name = rs.getString("name"),
-                abbreviation = rs.getString("abbreviation"),
-                alternativeName = rs.getString("alternative_name"),
-                logoId = rs.getLong("platform_logo").takeIf { !rs.wasNull() },
-                typeId = rs.getLong("platform_type").takeIf { !rs.wasNull() },
-            )
-        }
-        val resolvedRows = resolvePlatformReferences(
-            rows = sourceRows,
-            availableLogoIds = loadIdSet("service.platform_logo"),
-            availableTypeIds = loadIdSet("service.platform_type"),
-        )
-        val existingById = jdbc.query(
+    private fun loadCurrentPlatformsById(): Map<Long, PlatformSyncRow> =
+        jdbc.query(
             """
             SELECT id, name, abbreviation, alternative_name, logo_id, type_id
             FROM service.platform
@@ -823,48 +781,9 @@ class ServiceEtlJdbcRepository(
                 typeId = rs.getLong("type_id").takeIf { !rs.wasNull() },
             )
         }.associateBy { it.id }
-        val changedRows = resolvedRows.filter { existingById[it.id] != it }
 
-        batchUpsert(
-            """
-            INSERT INTO service.platform (id, name, abbreviation, alternative_name, logo_id, type_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                abbreviation = EXCLUDED.abbreviation,
-                alternative_name = EXCLUDED.alternative_name,
-                logo_id = EXCLUDED.logo_id,
-                type_id = EXCLUDED.type_id
-            """.trimIndent(),
-            changedRows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.name)
-            setNullableString(3, row.abbreviation)
-            setNullableString(4, row.alternativeName)
-            setNullableLong(5, row.logoId)
-            setNullableLong(6, row.typeId)
-        }
-        return diffResult(changedRows.size)
-    }
-
-    fun syncCompanies(): ServiceEtlTableSyncResult {
-        val sourceRows = jdbc.query(
-            """
-            SELECT id, name, parent, changed_company_id
-            FROM ingest.company
-            ORDER BY id
-            """.trimIndent(),
-        ) { rs, _ ->
-            CompanySyncRow(
-                id = rs.getLong("id"),
-                name = rs.getString("name"),
-                parentCompanyId = rs.getLong("parent").takeIf { !rs.wasNull() },
-                mergedIntoCompanyId = rs.getLong("changed_company_id").takeIf { !rs.wasNull() },
-            )
-        }
-        val resolvedRows = resolveCompanyReferences(sourceRows)
-        val existingById = jdbc.query(
+    private fun loadCurrentCompaniesById(): Map<Long, CompanySyncRow> =
+        jdbc.query(
             """
             SELECT id, name, parent_company_id, merged_into_company_id
             FROM service.company
@@ -877,420 +796,6 @@ class ServiceEtlJdbcRepository(
                 mergedIntoCompanyId = rs.getLong("merged_into_company_id").takeIf { !rs.wasNull() },
             )
         }.associateBy { it.id }
-        val changedRows = resolvedRows.filter { existingById[it.id] != it }
-
-        batchUpsert(
-            """
-            INSERT INTO service.company (id, name, parent_company_id, merged_into_company_id)
-            VALUES (?, ?, NULL, NULL)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name
-            """.trimIndent(),
-            changedRows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.name)
-        }
-        batchUpsert(
-            """
-            UPDATE service.company
-            SET parent_company_id = ?, merged_into_company_id = ?
-            WHERE id = ?
-            """.trimIndent(),
-            changedRows,
-        ) { row ->
-            setNullableLong(1, row.parentCompanyId)
-            setNullableLong(2, row.mergedIntoCompanyId)
-            setLong(3, row.id)
-        }
-        return diffResult(changedRows.size)
-    }
-
-    private fun syncNamedDimensionByDiff(
-        sourceTable: String,
-        sourceValueColumn: String,
-        targetTable: String,
-        targetValueColumn: String,
-    ): ServiceEtlTableSyncResult {
-        val rows = jdbc.query(
-            """
-            SELECT i.id, i.$sourceValueColumn AS value
-            FROM ingest.$sourceTable i
-            LEFT JOIN service.$targetTable s ON s.id = i.id
-            WHERE s.id IS NULL
-               OR ${differenceCondition("s.$targetValueColumn", "i.$sourceValueColumn")}
-            ORDER BY i.id
-            """.trimIndent(),
-        ) { rs, _ ->
-            NamedDimensionRow(
-                id = rs.getLong("id"),
-                value = rs.getString("value"),
-            )
-        }
-        batchUpsert(
-            """
-            INSERT INTO service.$targetTable (id, $targetValueColumn)
-            VALUES (?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                $targetValueColumn = EXCLUDED.$targetValueColumn
-            """.trimIndent(),
-            rows,
-        ) { row ->
-            setLong(1, row.id)
-            setNullableString(2, row.value)
-        }
-        return diffResult(rows.size)
-    }
-
-    private fun loadGameProjectionRows(gameIds: Set<Long>): List<GameProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                SELECT id, slug, name, summary, storyline, first_release_date, game_status, game_type, updated_at, tags
-                FROM ingest.game
-                WHERE id IN ($placeholders)
-                ORDER BY id
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameProjectionRow(
-                    id = rs.getLong("id"),
-                    slug = rs.getString("slug"),
-                    name = rs.getString("name"),
-                    summary = rs.getString("summary"),
-                    storyline = rs.getString("storyline"),
-                    firstReleaseDateEpochSecond = rs.getLong("first_release_date").takeIf { !rs.wasNull() },
-                    statusId = rs.getLong("game_status").takeIf { !rs.wasNull() },
-                    typeId = rs.getLong("game_type").takeIf { !rs.wasNull() },
-                    sourceUpdatedAtEpochSecond = rs.getLong("updated_at").takeIf { !rs.wasNull() },
-                    tags = rs.getNullableLongList("tags"),
-                )
-            },
-        )
-
-    private fun loadGameLocalizationProjectionRows(gameIds: Set<Long>): List<GameLocalizationProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                SELECT id, game, region, name
-                FROM ingest.game_localization
-                WHERE game IN ($placeholders)
-                ORDER BY game, id
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameLocalizationProjectionRow(
-                    id = rs.getLong("id"),
-                    gameId = rs.getLong("game"),
-                    regionId = rs.getLong("region").takeIf { !rs.wasNull() },
-                    name = rs.getString("name"),
-                )
-            },
-        )
-
-    private fun loadGameReleaseProjectionRows(gameIds: Set<Long>): List<GameReleaseProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                SELECT id, game, platform, release_region, status, date, y, m, human
-                FROM ingest.release_date
-                WHERE game IN ($placeholders)
-                ORDER BY game, id
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameReleaseProjectionRow(
-                    id = rs.getLong("id"),
-                    gameId = rs.getLong("game"),
-                    platformId = rs.getLong("platform").takeIf { !rs.wasNull() },
-                    regionId = rs.getLong("release_region").takeIf { !rs.wasNull() },
-                    statusId = rs.getLong("status").takeIf { !rs.wasNull() },
-                    releaseDateEpochSecond = rs.getLong("date").takeIf { !rs.wasNull() },
-                    year = rs.getInt("y").takeIf { !rs.wasNull() },
-                    month = rs.getInt("m").takeIf { !rs.wasNull() },
-                    dateHuman = rs.getString("human"),
-                )
-            },
-        )
-
-    private fun loadExistingIngestGameIds(gameIds: Set<Long>): Set<Long> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                SELECT id
-                FROM ingest.game
-                WHERE id IN ($placeholders)
-                ORDER BY id
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ -> rs.getLong("id") },
-        ).toCollection(linkedSetOf())
-
-    private fun loadGameLanguageProjectionRows(gameIds: Set<Long>): List<GameLanguageProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                SELECT
-                    ls.game AS game_id,
-                    ls.language AS language_id,
-                    bool_or(lower(COALESCE(lst.name, '')) = 'audio') AS supports_audio,
-                    bool_or(lower(COALESCE(lst.name, '')) IN ('subtitles', 'subtitle')) AS supports_subtitles,
-                    bool_or(lower(COALESCE(lst.name, '')) = 'interface') AS supports_interface
-                FROM ingest.language_support ls
-                LEFT JOIN ingest.language_support_type lst ON lst.id = ls.language_support_type
-                WHERE ls.game IN ($placeholders)
-                  AND ls.language IS NOT NULL
-                GROUP BY ls.game, ls.language
-                HAVING bool_or(lower(COALESCE(lst.name, '')) = 'audio')
-                    OR bool_or(lower(COALESCE(lst.name, '')) IN ('subtitles', 'subtitle'))
-                    OR bool_or(lower(COALESCE(lst.name, '')) = 'interface')
-                ORDER BY ls.game, ls.language
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameLanguageProjectionRow(
-                    gameId = rs.getLong("game_id"),
-                    languageId = rs.getLong("language_id"),
-                    supportsAudio = rs.getBoolean("supports_audio"),
-                    supportsSubtitles = rs.getBoolean("supports_subtitles"),
-                    supportsInterface = rs.getBoolean("supports_interface"),
-                )
-            },
-        )
-
-    private fun loadGameArrayProjectionRows(
-        gameIds: Set<Long>,
-        sourceColumn: String,
-    ): List<GameDimensionProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                WITH filtered_games AS (
-                    SELECT id, $sourceColumn
-                    FROM ingest.game
-                    WHERE id IN ($placeholders)
-                )
-                SELECT DISTINCT game_id, dimension_id
-                FROM (
-                    SELECT fg.id AS game_id, ref.dimension_id
-                    FROM filtered_games fg
-                    CROSS JOIN LATERAL unnest(COALESCE(fg.$sourceColumn, ARRAY[]::BIGINT[])) AS ref(dimension_id)
-                ) rows
-                ORDER BY game_id, dimension_id
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameDimensionProjectionRow(
-                    gameId = rs.getLong("game_id"),
-                    dimensionId = rs.getLong("dimension_id"),
-                )
-            },
-        )
-
-    private fun loadGameCompanyProjectionRows(gameIds: Set<Long>): List<GameCompanyProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                SELECT
-                    ic.game AS game_id,
-                    ic.company AS company_id,
-                    bool_or(COALESCE(ic.developer, FALSE)) AS is_developer,
-                    bool_or(COALESCE(ic.publisher, FALSE)) AS is_publisher,
-                    bool_or(COALESCE(ic.porting, FALSE)) AS is_porting,
-                    bool_or(COALESCE(ic.supporting, FALSE)) AS is_supporting
-                FROM ingest.involved_company ic
-                WHERE ic.game IN ($placeholders)
-                  AND ic.company IS NOT NULL
-                GROUP BY ic.game, ic.company
-                HAVING bool_or(COALESCE(ic.developer, FALSE))
-                    OR bool_or(COALESCE(ic.publisher, FALSE))
-                    OR bool_or(COALESCE(ic.porting, FALSE))
-                    OR bool_or(COALESCE(ic.supporting, FALSE))
-                ORDER BY ic.game, ic.company
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameCompanyProjectionRow(
-                    gameId = rs.getLong("game_id"),
-                    companyId = rs.getLong("company_id"),
-                    isDeveloper = rs.getBoolean("is_developer"),
-                    isPublisher = rs.getBoolean("is_publisher"),
-                    isPorting = rs.getBoolean("is_porting"),
-                    isSupporting = rs.getBoolean("is_supporting"),
-                )
-            },
-        )
-
-    private fun loadGameRelationProjectionRows(gameIds: Set<Long>): List<GameRelationProjectionRow> =
-        queryByLongIdChunks(
-            ids = gameIds,
-            sqlBuilder = { placeholders ->
-                """
-                WITH filtered_games AS (
-                    SELECT
-                        id,
-                        parent_game,
-                        remakes,
-                        remasters,
-                        ports,
-                        standalone_expansions,
-                        similar_games
-                    FROM ingest.game
-                    WHERE id IN ($placeholders)
-                )
-                SELECT game_id, related_game_id, relation_type
-                FROM (
-                    SELECT id AS game_id, parent_game AS related_game_id, 'PARENT' AS relation_type
-                    FROM filtered_games
-                    WHERE parent_game IS NOT NULL
-                    UNION
-                    SELECT fg.id AS game_id, rel.related_game_id, 'REMAKE' AS relation_type
-                    FROM filtered_games fg
-                    CROSS JOIN LATERAL unnest(COALESCE(fg.remakes, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                    UNION
-                    SELECT fg.id AS game_id, rel.related_game_id, 'REMASTER' AS relation_type
-                    FROM filtered_games fg
-                    CROSS JOIN LATERAL unnest(COALESCE(fg.remasters, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                    UNION
-                    SELECT fg.id AS game_id, rel.related_game_id, 'PORT' AS relation_type
-                    FROM filtered_games fg
-                    CROSS JOIN LATERAL unnest(COALESCE(fg.ports, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                    UNION
-                    SELECT fg.id AS game_id, rel.related_game_id, 'STANDALONE_EXPANSION' AS relation_type
-                    FROM filtered_games fg
-                    CROSS JOIN LATERAL unnest(COALESCE(fg.standalone_expansions, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                    UNION
-                    SELECT fg.id AS game_id, rel.related_game_id, 'SIMILAR' AS relation_type
-                    FROM filtered_games fg
-                    CROSS JOIN LATERAL unnest(COALESCE(fg.similar_games, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                ) rows
-                ORDER BY game_id, relation_type, related_game_id
-                """.trimIndent()
-            },
-            rowMapper = { rs, _ ->
-                GameRelationProjectionRow(
-                    gameId = rs.getLong("game_id"),
-                    relatedGameId = rs.getLong("related_game_id"),
-                    relationType = rs.getString("relation_type"),
-                )
-            },
-        )
-
-    private fun findDistinctGameIdsByUpdatedAt(tableName: String, cursorFrom: Long): Set<Long> =
-        jdbc.query(
-            """
-            SELECT DISTINCT game
-            FROM ingest.$tableName
-            WHERE updated_at > ?
-              AND game IS NOT NULL
-            ORDER BY game
-            """.trimIndent(),
-            { rs, _ -> rs.getLong("game") },
-            cursorFrom,
-        ).toCollection(linkedSetOf())
-
-    private fun loadIdSet(tableName: String): Set<Long> =
-        jdbc.query("SELECT id FROM $tableName") { rs, _ -> rs.getLong("id") }.toSet()
-
-    private fun findAffectedGameIdsFromGameArrayProjectionDiff(
-        targetTable: String,
-        targetColumn: String,
-        sourceColumn: String,
-        dimensionTable: String,
-    ): Set<Long> =
-        jdbc.query(
-            """
-            WITH source_rows AS (
-                SELECT DISTINCT i.id AS game_id, ref.dimension_id
-                FROM ingest.game i
-                JOIN service.game sg ON sg.id = i.id
-                CROSS JOIN LATERAL unnest(COALESCE(i.$sourceColumn, ARRAY[]::BIGINT[])) AS ref(dimension_id)
-                JOIN service.$dimensionTable d ON d.id = ref.dimension_id
-            )
-            SELECT DISTINCT game_id
-            FROM (
-                SELECT src.game_id
-                FROM source_rows src
-                LEFT JOIN service.$targetTable s
-                  ON s.game_id = src.game_id
-                 AND s.$targetColumn = src.dimension_id
-                WHERE s.game_id IS NULL
-                UNION
-                SELECT s.game_id
-                FROM service.$targetTable s
-                JOIN ingest.game g ON g.id = s.game_id
-                LEFT JOIN source_rows src
-                  ON src.game_id = s.game_id
-                 AND src.dimension_id = s.$targetColumn
-                WHERE src.game_id IS NULL
-            ) affected
-            ORDER BY game_id
-            """.trimIndent(),
-        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
-
-    internal fun findAffectedGameIdsFromGameRelationProjectionDiff(): Set<Long> =
-        jdbc.query(
-            """
-            WITH source_rows AS (
-                SELECT i.id AS game_id, i.parent_game AS related_game_id, 'PARENT' AS relation_type
-                FROM ingest.game i
-                JOIN ingest.game rg ON rg.id = i.parent_game
-                WHERE i.parent_game IS NOT NULL
-                UNION
-                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'REMAKE' AS relation_type
-                FROM ingest.game i
-                CROSS JOIN LATERAL unnest(COALESCE(i.remakes, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                JOIN ingest.game rg ON rg.id = rel.related_game_id
-                UNION
-                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'REMASTER' AS relation_type
-                FROM ingest.game i
-                CROSS JOIN LATERAL unnest(COALESCE(i.remasters, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                JOIN ingest.game rg ON rg.id = rel.related_game_id
-                UNION
-                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'PORT' AS relation_type
-                FROM ingest.game i
-                CROSS JOIN LATERAL unnest(COALESCE(i.ports, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                JOIN ingest.game rg ON rg.id = rel.related_game_id
-                UNION
-                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'STANDALONE_EXPANSION' AS relation_type
-                FROM ingest.game i
-                CROSS JOIN LATERAL unnest(COALESCE(i.standalone_expansions, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                JOIN ingest.game rg ON rg.id = rel.related_game_id
-                UNION
-                SELECT DISTINCT i.id AS game_id, rel.related_game_id, 'SIMILAR' AS relation_type
-                FROM ingest.game i
-                CROSS JOIN LATERAL unnest(COALESCE(i.similar_games, ARRAY[]::BIGINT[])) AS rel(related_game_id)
-                JOIN ingest.game rg ON rg.id = rel.related_game_id
-            )
-            SELECT DISTINCT game_id
-            FROM (
-                SELECT src.game_id
-                FROM source_rows src
-                LEFT JOIN service.game_relation s
-                  ON s.game_id = src.game_id
-                 AND s.related_game_id = src.related_game_id
-                 AND s.relation_type = src.relation_type
-                WHERE s.game_id IS NULL
-                UNION
-                SELECT s.game_id
-                FROM service.game_relation s
-                JOIN ingest.game g ON g.id = s.game_id
-                LEFT JOIN source_rows src
-                  ON src.game_id = s.game_id
-                 AND src.related_game_id = s.related_game_id
-                 AND src.relation_type = s.relation_type
-                WHERE src.game_id IS NULL
-            ) affected
-            ORDER BY game_id
-            """.trimIndent(),
-        ) { rs, _ -> rs.getLong("game_id") }.toCollection(linkedSetOf())
 
     private fun deleteByGameIds(tableName: String, gameIds: Set<Long>) {
         if (gameIds.isEmpty()) {
@@ -1307,15 +812,15 @@ class ServiceEtlJdbcRepository(
 
     private fun rebuildGameArrayBridgeProjection(
         tableName: String,
+        targetColumn: String,
         materializedGameIds: Set<Long>,
+        sourceRows: List<GameDimensionProjectionRow>,
         availableGameIds: Set<Long>,
         availableDimensionIds: Set<Long>,
-        sourceColumn: String,
-        targetColumn: String,
     ) {
         deleteByGameIds(tableName, materializedGameIds)
-        val rows = resolveGameDimensionReferences(
-            rows = loadGameArrayProjectionRows(materializedGameIds, sourceColumn),
+        val resolvedRows = resolveGameDimensionReferences(
+            rows = sourceRows,
             availableGameIds = availableGameIds,
             availableDimensionIds = availableDimensionIds,
         )
@@ -1324,35 +829,12 @@ class ServiceEtlJdbcRepository(
             INSERT INTO $tableName (game_id, $targetColumn)
             VALUES (?, ?)
             """.trimIndent(),
-            rows,
+            resolvedRows,
         ) { row ->
             setLong(1, row.gameId)
             setLong(2, row.dimensionId)
         }
     }
-
-    private fun <T> queryByLongIdChunks(
-        ids: Set<Long>,
-        sqlBuilder: (String) -> String,
-        rowMapper: (ResultSet, Int) -> T,
-    ): List<T> {
-        if (ids.isEmpty()) {
-            return emptyList()
-        }
-        val rows = mutableListOf<T>()
-        ids.toList().chunked(PROJECTION_QUERY_CHUNK_SIZE).forEach { chunk ->
-            val placeholders = chunk.joinToString(",") { "?" }
-            rows += jdbc.query(
-                sqlBuilder(placeholders),
-                rowMapper,
-                *chunk.toTypedArray(),
-            )
-        }
-        return rows
-    }
-
-    private fun differenceCondition(leftExpression: String, rightExpression: String): String =
-        "NOT (($leftExpression = $rightExpression) OR ($leftExpression IS NULL AND $rightExpression IS NULL))"
 
     private fun diffResult(processedRows: Int, note: String = DIFF_NOTE) =
         ServiceEtlTableSyncResult(
@@ -1444,37 +926,37 @@ data class ServiceEtlTableSyncResult(
     val note: String? = null,
 )
 
-private data class NamedDimensionRow(
+data class NamedDimensionRow(
     val id: Long,
     val value: String?,
 )
 
-private data class LanguageRow(
+data class LanguageRow(
     val id: Long,
     val locale: String?,
     val name: String?,
     val nativeName: String?,
 )
 
-private data class RegionRow(
+data class RegionRow(
     val id: Long,
     val name: String?,
     val identifier: String?,
 )
 
-private data class ReleaseStatusRow(
+data class ReleaseStatusRow(
     val id: Long,
     val name: String?,
     val description: String?,
 )
 
-private data class PlatformLogoRow(
+data class PlatformLogoRow(
     val id: Long,
     val imageId: String?,
     val url: String?,
 )
 
-internal data class GameProjectionRow(
+data class GameProjectionRow(
     val id: Long,
     val slug: String?,
     val name: String?,
@@ -1487,14 +969,14 @@ internal data class GameProjectionRow(
     val tags: List<Long>?,
 )
 
-internal data class GameLocalizationProjectionRow(
+data class GameLocalizationProjectionRow(
     val id: Long,
     val gameId: Long,
     val regionId: Long?,
     val name: String?,
 )
 
-internal data class GameReleaseProjectionRow(
+data class GameReleaseProjectionRow(
     val id: Long,
     val gameId: Long,
     val platformId: Long?,
@@ -1506,7 +988,7 @@ internal data class GameReleaseProjectionRow(
     val dateHuman: String?,
 )
 
-internal data class GameLanguageProjectionRow(
+data class GameLanguageProjectionRow(
     val gameId: Long,
     val languageId: Long,
     val supportsAudio: Boolean,
@@ -1514,12 +996,12 @@ internal data class GameLanguageProjectionRow(
     val supportsInterface: Boolean,
 )
 
-internal data class GameDimensionProjectionRow(
+data class GameDimensionProjectionRow(
     val gameId: Long,
     val dimensionId: Long,
 )
 
-internal data class GameCompanyProjectionRow(
+data class GameCompanyProjectionRow(
     val gameId: Long,
     val companyId: Long,
     val isDeveloper: Boolean,
@@ -1528,13 +1010,13 @@ internal data class GameCompanyProjectionRow(
     val isSupporting: Boolean,
 )
 
-internal data class GameRelationProjectionRow(
+data class GameRelationProjectionRow(
     val gameId: Long,
     val relatedGameId: Long,
     val relationType: String,
 )
 
-internal data class PlatformSyncRow(
+data class PlatformSyncRow(
     val id: Long,
     val name: String?,
     val abbreviation: String?,
@@ -1543,7 +1025,7 @@ internal data class PlatformSyncRow(
     val typeId: Long?,
 )
 
-internal data class CompanySyncRow(
+data class CompanySyncRow(
     val id: Long,
     val name: String?,
     val parentCompanyId: Long?,

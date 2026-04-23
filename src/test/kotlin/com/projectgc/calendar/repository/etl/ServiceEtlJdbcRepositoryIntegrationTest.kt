@@ -1,5 +1,6 @@
 package com.projectgc.calendar.repository.etl
 
+import com.projectgc.calendar.service.etl.AffectedGameIdCalculator
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -9,6 +10,7 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 @Tag("integration")
 @Testcontainers(disabledWithoutDocker = true)
@@ -20,44 +22,65 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
         val postgres = PostgreSQLContainer("postgres:16-alpine")
     }
 
-    private lateinit var jdbc: JdbcTemplate
-    private lateinit var repository: ServiceEtlJdbcRepository
+    private lateinit var ingestJdbc: JdbcTemplate
+    private lateinit var serviceJdbc: JdbcTemplate
+    private lateinit var ingestRepository: IngestEtlReadJdbcRepository
+    private lateinit var serviceRepository: ServiceEtlJdbcRepository
+    private lateinit var calculator: AffectedGameIdCalculator
 
     @BeforeEach
     fun setUp() {
-        val dataSource = DriverManagerDataSource(
+        val ingestDataSource = DriverManagerDataSource(
             postgres.jdbcUrl,
             postgres.username,
             postgres.password,
         )
-        jdbc = JdbcTemplate(dataSource)
-        repository = ServiceEtlJdbcRepository(jdbc)
+        val serviceDataSource = DriverManagerDataSource(
+            postgres.jdbcUrl,
+            postgres.username,
+            postgres.password,
+        )
+        ingestJdbc = JdbcTemplate(ingestDataSource)
+        serviceJdbc = JdbcTemplate(serviceDataSource)
+        ingestRepository = IngestEtlReadJdbcRepository(ingestJdbc)
+        serviceRepository = ServiceEtlJdbcRepository(serviceJdbc)
+        calculator = AffectedGameIdCalculator(ingestRepository, serviceRepository)
         resetSchemas()
     }
 
     @Test
-    fun `findAffectedGameIdsFromGameRelationProjectionDiff includes existing source game when related game is newly materialized in same run`() {
-        jdbc.update("INSERT INTO ingest.game (id, similar_games) VALUES (1, ARRAY[2]::BIGINT[])")
-        jdbc.update("INSERT INTO ingest.game (id) VALUES (2)")
-        jdbc.update("INSERT INTO service.game (id) VALUES (1)")
+    fun `game relation diff includes existing source game when related game is newly materialized in same run`() {
+        ingestJdbc.update("INSERT INTO ingest.game (id, similar_games) VALUES (1, ARRAY[2]::BIGINT[])")
+        ingestJdbc.update("INSERT INTO ingest.game (id) VALUES (2)")
+        serviceJdbc.update("INSERT INTO service.game (id) VALUES (1)")
 
-        assertEquals(
-            linkedSetOf(1L),
-            repository.findAffectedGameIdsFromGameRelationProjectionDiff(),
-        )
+        val calculationResult = calculator.calculate(500L)
+        val gameSourceResult = calculationResult.sourceResults.first { it.tableName == "game" }
+
+        assertTrue(1L in gameSourceResult.affectedGameIds)
     }
 
     @Test
     fun `rebuildGameDependentBridgeProjections inserts game relation for related game materialized in same run`() {
-        jdbc.update("INSERT INTO ingest.game (id, similar_games) VALUES (1, ARRAY[2]::BIGINT[])")
-        jdbc.update("INSERT INTO ingest.game (id) VALUES (2)")
-        jdbc.update("INSERT INTO service.game (id) VALUES (1)")
-        jdbc.update("INSERT INTO service.game (id) VALUES (2)")
-        jdbc.update("INSERT INTO service.game_relation (game_id, related_game_id, relation_type) VALUES (1, 99, 'SIMILAR')")
+        ingestJdbc.update("INSERT INTO ingest.game (id, similar_games) VALUES (1, ARRAY[2]::BIGINT[])")
+        ingestJdbc.update("INSERT INTO ingest.game (id) VALUES (2)")
+        serviceJdbc.update("INSERT INTO service.game (id) VALUES (1)")
+        serviceJdbc.update("INSERT INTO service.game (id) VALUES (2)")
+        serviceJdbc.update("INSERT INTO service.game_relation (game_id, related_game_id, relation_type) VALUES (1, 99, 'SIMILAR')")
 
-        repository.rebuildGameDependentBridgeProjections(linkedSetOf(1L, 2L))
+        serviceRepository.rebuildGameDependentBridgeProjections(
+            materializedGameIds = linkedSetOf(1L, 2L),
+            gameLanguageRows = emptyList(),
+            gameGenreRows = emptyList(),
+            gameThemeRows = emptyList(),
+            gamePlayerPerspectiveRows = emptyList(),
+            gameModeRows = emptyList(),
+            gameKeywordRows = emptyList(),
+            gameCompanyRows = emptyList(),
+            gameRelationRows = ingestRepository.loadGameRelationProjectionRows(linkedSetOf(1L, 2L)),
+        )
 
-        val relationRows = jdbc.query(
+        val relationRows = serviceJdbc.query(
             """
             SELECT game_id, related_game_id, relation_type
             FROM service.game_relation
@@ -86,6 +109,15 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
             """
             CREATE TABLE ingest.game (
                 id BIGINT PRIMARY KEY,
+                slug TEXT NULL,
+                name TEXT NULL,
+                summary TEXT NULL,
+                storyline TEXT NULL,
+                first_release_date BIGINT NULL,
+                game_status BIGINT NULL,
+                game_type BIGINT NULL,
+                updated_at BIGINT NULL,
+                tags BIGINT[] NULL,
                 parent_game BIGINT NULL,
                 remakes BIGINT[] NULL,
                 remasters BIGINT[] NULL,
@@ -100,6 +132,29 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
             )
             """.trimIndent(),
             """
+            CREATE TABLE ingest.release_date (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NULL,
+                platform BIGINT NULL,
+                release_region BIGINT NULL,
+                status BIGINT NULL,
+                date BIGINT NULL,
+                y INT NULL,
+                m INT NULL,
+                human TEXT NULL,
+                updated_at BIGINT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE ingest.game_localization (
+                id BIGINT PRIMARY KEY,
+                game BIGINT NULL,
+                region BIGINT NULL,
+                name TEXT NULL,
+                updated_at BIGINT NULL
+            )
+            """.trimIndent(),
+            """
             CREATE TABLE ingest.language_support_type (
                 id BIGINT PRIMARY KEY,
                 name TEXT NOT NULL
@@ -110,7 +165,8 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
                 id BIGINT PRIMARY KEY,
                 game BIGINT NOT NULL,
                 language BIGINT NOT NULL,
-                language_support_type BIGINT NULL
+                language_support_type BIGINT NULL,
+                updated_at BIGINT NULL
             )
             """.trimIndent(),
             """
@@ -121,11 +177,51 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
                 developer BOOLEAN NULL,
                 publisher BOOLEAN NULL,
                 porting BOOLEAN NULL,
-                supporting BOOLEAN NULL
+                supporting BOOLEAN NULL,
+                updated_at BIGINT NULL
             )
             """.trimIndent(),
-            "CREATE TABLE service.game (id BIGINT PRIMARY KEY)",
+            """
+            CREATE TABLE service.game (
+                id BIGINT PRIMARY KEY,
+                slug TEXT NULL,
+                name TEXT NULL,
+                summary TEXT NULL,
+                storyline TEXT NULL,
+                first_release_date TIMESTAMP NULL,
+                status_id BIGINT NULL,
+                type_id BIGINT NULL,
+                source_updated_at TIMESTAMP NULL,
+                tags BIGINT[] NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.game_release (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                platform_id BIGINT NULL,
+                region_id BIGINT NULL,
+                status_id BIGINT NULL,
+                release_date TIMESTAMP NULL,
+                year INT NULL,
+                month INT NULL,
+                date_human TEXT NULL
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE service.game_localization (
+                id BIGINT PRIMARY KEY,
+                game_id BIGINT NOT NULL,
+                region_id BIGINT NULL,
+                name TEXT NULL
+            )
+            """.trimIndent(),
+            "CREATE TABLE service.game_status (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE service.game_type (id BIGINT PRIMARY KEY)",
             "CREATE TABLE service.language (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE service.region (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE service.release_region (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE service.release_status (id BIGINT PRIMARY KEY)",
             "CREATE TABLE service.genre (id BIGINT PRIMARY KEY)",
             "CREATE TABLE service.theme (id BIGINT PRIMARY KEY)",
             "CREATE TABLE service.player_perspective (id BIGINT PRIMARY KEY)",
@@ -168,10 +264,11 @@ class ServiceEtlJdbcRepositoryIntegrationTest {
                 relation_type TEXT NOT NULL
             )
             """.trimIndent(),
+            "CREATE TABLE service.etl_cursor (table_name TEXT PRIMARY KEY, last_synced_at BIGINT NOT NULL, synced_at TIMESTAMP NOT NULL)",
         )
     }
 
     private fun executeAll(vararg statements: String) {
-        statements.forEach(jdbc::execute)
+        statements.forEach(ingestJdbc::execute)
     }
 }

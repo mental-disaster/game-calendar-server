@@ -376,7 +376,23 @@
 
 ### 현재 상태
 
-예정.
+승인.
+
+정리:
+
+- `IngestEtlReadJdbcRepository`와 `ServiceEtlJdbcRepository`로 repository 책임이 분리되었다.
+- `ingestReadJdbcTemplate`와 `serviceJdbcTemplate`는 각각 별도 datasource bean에 wiring되도록 구성되었다.
+- `ServiceEtlService`는 ingest snapshot 준비를 transaction 바깥에서 끝내고, service 비교/적용만 service DB 로컬 트랜잭션 안에서 수행하도록 정리되었다.
+- `AffectedGameIdCalculator.findAffectedGameIdsByKey`는 content diff 시 old/new gameId를 모두 affected에 포함하도록 수정되었다.
+- 관련 설정 테스트, 단위 테스트, service 테스트, repository integration test가 JDK 21 기준 통과했다는 리뷰가 있다.
+
+### 후속 메모
+
+- 배열 bridge diff는 SQL join 제거의 대가로 전체 ingest row를 여러 번 메모리로 적재하므로, 데이터 증가 시 chunk/streaming 전략을 더 빨리 검토해야 한다.
+- `application.yml.sample`에는 아직 `calendar.etl.ingest-read-datasource`, `calendar.etl.service-datasource` 예시가 드러나지 않아 운영 재현성이 떨어질 수 있다.
+- split-DB 핵심 회귀 테스트가 여전히 `integrationTest` task에만 있어, 기본 `test` 경로만으로는 놓칠 수 있다.
+- 현재 integration test는 datasource bean은 분리됐지만 같은 PostgreSQL URL을 쓰므로, 완전히 다른 JDBC URL을 가리키는 end-to-end 검증은 후속 보강 대상이다.
+- `game_localization`의 old/new gameId 양쪽 반영은 helper 수준으로는 맞지만 전용 회귀 테스트를 하나 더 두면 안전하다.
 
 ### 목표
 
@@ -419,6 +435,7 @@
 - datasource 설정이 `ingest read`와 `service write/read`로 명시적으로 분리되는지
 - `calendar`가 두 DB를 읽더라도 비교/적용 단계가 분리되어 있는지
 - 기존 Slice 2~5의 정합성 계약이 유지되는지
+- content diff 시 old gameId와 new gameId가 모두 affected에 반영되는지
 - 단계 ii에서 DB만 먼저 분리돼도 같은 ETL 로직이 유지 가능한지
 - 단계 iii에서 source 전달 방식만 바꾸면 되는 구조로 좁혀졌는지
 
@@ -427,9 +444,12 @@
 - Slice 2~5 경로에서 `ingest`와 `service`를 같은 SQL에서 함께 참조하는 쿼리가 제거된다.
 - `calendar`는 `ingest`용 repository와 `service`용 repository를 분리해 가진다.
 - 하나의 repository/DAO는 한 DB 책임만 가진다.
+- `ingestReadJdbcTemplate`와 `serviceJdbcTemplate`는 서로 다른 datasource bean으로 wiring된다.
 - `calendar`는 여전히 `ingest`와 `service`에 각각 접근할 수 있지만, cross-db join 없이 ETL을 수행한다.
 - ETL은 두 DB에 걸친 단일 트랜잭션을 전제하지 않는다.
+- ingest source 추출 단계는 service write transaction 바깥에서 끝나고, service 비교/적용만 service DB 로컬 트랜잭션 안에서 수행된다.
 - 차원 diff, core projection diff, bridge projection diff 결과가 기존과 동일한 정합성을 유지한다.
+- content diff로 `game_id`가 바뀌는 경우 old gameId와 new gameId가 모두 affected에 포함되어 stale row가 남지 않는다.
 - Slice 6은 이 선행 정리를 전제로 구현된다.
 
 ## Slice 6. 미디어/부가 projection 재구성
