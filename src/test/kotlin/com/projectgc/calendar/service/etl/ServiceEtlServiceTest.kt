@@ -3,15 +3,15 @@ package com.projectgc.calendar.service.etl
 import com.projectgc.calendar.repository.etl.AlternativeNameProjectionRow
 import com.projectgc.calendar.repository.etl.ArtworkProjectionRow
 import com.projectgc.calendar.repository.etl.CoverProjectionRow
-import com.projectgc.calendar.repository.etl.GameCompanyProjectionRow
-import com.projectgc.calendar.repository.etl.GameVideoProjectionRow
-import com.projectgc.calendar.repository.etl.GameLocalizationProjectionRow
 import com.projectgc.calendar.repository.etl.GameProjectionRow
 import com.projectgc.calendar.repository.etl.GameReleaseProjectionRow
+import com.projectgc.calendar.repository.etl.GameLocalizationProjectionRow
+import com.projectgc.calendar.repository.etl.GameVideoProjectionRow
 import com.projectgc.calendar.repository.etl.IngestEtlReadJdbcRepository
 import com.projectgc.calendar.repository.etl.NamedDimensionRow
 import com.projectgc.calendar.repository.etl.ScreenshotProjectionRow
 import com.projectgc.calendar.repository.etl.ServiceEtlJdbcRepository
+import com.projectgc.calendar.repository.etl.ServiceEtlMismatchLogEntry
 import com.projectgc.calendar.repository.etl.ServiceEtlSourceLogEntry
 import com.projectgc.calendar.repository.etl.ServiceEtlTableSyncResult
 import com.projectgc.calendar.repository.etl.WebsiteProjectionRow
@@ -24,6 +24,7 @@ import org.mockito.Mockito.inOrder
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.reset
+import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.springframework.transaction.TransactionDefinition
@@ -34,59 +35,37 @@ import java.time.Instant
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ServiceEtlServiceTest {
-    companion object {
-        private val SLICE6_SOURCE_TABLES = listOf(
-            "game",
-            "release_date",
-            "involved_company",
-            "language_support",
-            "game_localization",
-            "cover",
-            "artwork",
-            "screenshot",
-            "game_video",
-            "website",
-            "alternative_name",
-        )
-    }
-
     private val ingestRepository = mock(IngestEtlReadJdbcRepository::class.java)
     private val repository = mock(ServiceEtlJdbcRepository::class.java)
     private val affectedGameIdCalculator = mock(AffectedGameIdCalculator::class.java)
     private val service = newService(NoOpTransactionManager())
     private val sourceLogs = mutableListOf<ServiceEtlSourceLogEntry>()
-    private val cursorWrites = mutableListOf<Pair<String, Long>>()
-    private val finishedStatuses = mutableListOf<String>()
+    private val mismatchLogs = mutableListOf<ServiceEtlMismatchLogEntry>()
+    private val finishEntries = mutableListOf<FinishEntry>()
 
     @BeforeEach
     fun setUp() {
         reset(ingestRepository, repository, affectedGameIdCalculator)
         sourceLogs.clear()
-        cursorWrites.clear()
-        finishedStatuses.clear()
-        `when`(repository.findCursor(anyObject(String::class.java))).thenReturn(null)
-        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
-        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java)))
-            .thenReturn(emptySlice6CalculationResult())
+        mismatchLogs.clear()
+        finishEntries.clear()
         doAnswer { invocation ->
             sourceLogs += invocation.arguments[0] as ServiceEtlSourceLogEntry
             null
         }.`when`(repository).insertSourceLog(anyObject(ServiceEtlSourceLogEntry::class.java))
         doAnswer { invocation ->
-            cursorWrites += (invocation.arguments[0] as String) to (invocation.arguments[1] as Long)
+            mismatchLogs += invocation.arguments[0] as List<ServiceEtlMismatchLogEntry>
             null
-        }.`when`(repository).upsertCursor(
-            anyObject(String::class.java),
-            org.mockito.Mockito.anyLong(),
-            anyObject(Instant::class.java),
-        )
+        }.`when`(repository).insertMismatchLogs(anyList())
         doAnswer { invocation ->
-            finishedStatuses += invocation.arguments[2] as String
+            finishEntries += FinishEntry(
+                status = invocation.arguments[2] as String,
+                mismatchCount = invocation.arguments[3] as Int,
+                errorMessage = invocation.arguments[4] as String?,
+            )
             null
         }.`when`(repository).finishRunLog(
             anyObject(UUID::class.java),
@@ -96,51 +75,41 @@ class ServiceEtlServiceTest {
             nullableObject(String::class.java),
         )
         stubEmptySlice2Syncs()
+        stubSlice7ValidationPass(emptyPreparedAffectedGameInputs())
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java)))
+            .thenReturn(emptySlice7CalculationResult())
     }
 
     @Test
-    fun `syncs prepared slice2 sources and rebuilds slice6 projections for all affected sources`() {
-        `when`(repository.syncGameStatuses(anyList()))
-            .thenReturn(ServiceEtlTableSyncResult(processedRows = 2, nextCursor = null))
-        `when`(repository.syncPlatformLogos(anyList()))
-            .thenReturn(
-                ServiceEtlTableSyncResult(
-                    processedRows = 1,
-                    nextCursor = null,
-                    note = "diff-based upsert: ingest.platform_logo has no updated_at cursor",
-                )
-            )
-        `when`(repository.syncCompanies(anyList()))
-            .thenReturn(ServiceEtlTableSyncResult(processedRows = 3, nextCursor = null))
-        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(
-            preparedAffectedGameInputs(gameIds = linkedSetOf(101L, 102L, 103L, 104L, 105L, 106L))
-        )
+    fun `syncs slice2 sources, validates slice7 state, and completes`() {
+        val preparedInputs = preparedAffectedGameInputs(linkedSetOf(101L, 102L))
+        stubSlice7ValidationPass(preparedInputs)
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(preparedInputs)
         `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
-            slice6CalculationResult(
+            slice7CalculationResult(
                 perTableGameIds = mapOf(
-                    "game" to setOf(101L, 102L, 103L),
-                    "release_date" to setOf(103L, 104L),
-                    "involved_company" to setOf(105L),
-                    "language_support" to setOf(106L),
-                    "cover" to setOf(101L, 107L),
-                    "website" to setOf(102L),
-                ),
-                noteByTable = mapOf(
-                    "game" to "slice6 projection diff",
-                    "cover" to "slice6 cover projection diff",
+                    "game" to setOf(101L, 102L),
+                    "release_date" to setOf(101L),
+                    "cover" to setOf(102L),
                 ),
             )
         )
 
-        val runId = UUID.randomUUID()
-        service.run(runId, ServiceEtlTrigger.manual())
+        service.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
 
-        verify(affectedGameIdCalculator).prepare(anyLong())
-        verify(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
-        verify(ingestRepository, never()).loadGameProjectionRows(anyLongSet())
-        verify(ingestRepository, never()).loadGameLocalizationProjectionRows(anyLongSet())
-        verify(ingestRepository, never()).loadGameReleaseProjectionRows(anyLongSet())
-        verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
+        verify(repository).syncPlatforms(anyList(), anyLongSet(), anyLongSet())
+        verify(repository).rebuildCoreGameProjections(
+            anyList(),
+            anyList(),
+            anyList(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+        )
         verify(repository).rebuildGameDependentBridgeProjections(
             anyLongSet(),
             anyList(),
@@ -151,6 +120,14 @@ class ServiceEtlServiceTest {
             anyList(),
             anyList(),
             anyList(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
         )
         verify(repository).rebuildGameMediaProjections(
             anyLongSet(),
@@ -160,58 +137,48 @@ class ServiceEtlServiceTest {
             anyList(),
             anyList(),
             anyList(),
+            anyLongSet(),
+            anyLongMap(),
+            anyLongSet(),
+        )
+        assertTrue(sourceLogs.any { it.tableName == "game" && it.note!!.contains("slice7 projections rebuilt and validated") })
+        assertEquals(emptyList(), mismatchLogs)
+        assertEquals(listOf(FinishEntry(status = "completed", mismatchCount = 0, errorMessage = null)), finishEntries)
+    }
+
+    @Test
+    fun `rebuilds shared-dimension deletion fallout even when calculator affected set is empty`() {
+        val preparedInputs = preparedAffectedGameInputs(linkedSetOf(11L))
+        val staleGameRow = preparedInputs.gameRows.single().copy(statusId = 999L)
+        val rebuiltGameRows = mutableListOf<List<GameProjectionRow>>()
+
+        stubSlice7ValidationPass(preparedInputs)
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(preparedInputs)
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java)))
+            .thenReturn(emptySlice7CalculationResult())
+        `when`(repository.loadCurrentGameProjectionRows()).thenReturn(
+            listOf(staleGameRow),
+            preparedInputs.gameRows,
+        )
+        doAnswer { invocation ->
+            rebuiltGameRows += invocation.arguments[0] as List<GameProjectionRow>
+            null
+        }.`when`(repository).rebuildCoreGameProjections(
+            anyList(),
+            anyList(),
+            anyList(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
         )
 
-        assertEquals(28, sourceLogs.size)
-        val logsByTable = sourceLogs.associateBy { it.tableName }
+        service.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
 
-        val gameStatusLog = logsByTable.getValue("game_status")
-        assertEquals("completed", gameStatusLog.status)
-        assertEquals(2, gameStatusLog.processedRows)
-        assertNull(gameStatusLog.cursorFrom)
-        assertNull(gameStatusLog.cursorTo)
-
-        val platformLogoLog = logsByTable.getValue("platform_logo")
-        assertEquals("completed", platformLogoLog.status)
-        assertEquals(1, platformLogoLog.processedRows)
-        assertNull(platformLogoLog.cursorFrom)
-        assertNull(platformLogoLog.cursorTo)
-        assertNotNull(platformLogoLog.note)
-
-        val gameLog = logsByTable.getValue("game")
-        assertEquals("completed", gameLog.status)
-        assertEquals(3, gameLog.processedRows)
-        assertNull(gameLog.cursorFrom)
-        assertNull(gameLog.cursorTo)
-        assertNotNull(gameLog.note)
-        assertTrue(gameLog.note!!.contains("slice6 projections rebuilt"))
-        assertTrue(!gameLog.note!!.contains("dry-run"))
-
-        val releaseDateLog = logsByTable.getValue("release_date")
-        assertEquals("completed", releaseDateLog.status)
-        assertEquals(2, releaseDateLog.processedRows)
-        assertNull(releaseDateLog.cursorFrom)
-        assertNull(releaseDateLog.cursorTo)
-        assertTrue(releaseDateLog.note!!.contains("slice6 projections rebuilt"))
-
-        val coverLog = logsByTable.getValue("cover")
-        assertEquals("completed", coverLog.status)
-        assertEquals(2, coverLog.processedRows)
-        assertNull(coverLog.cursorFrom)
-        assertNull(coverLog.cursorTo)
-        assertTrue(coverLog.note!!.contains("slice6 projections rebuilt"))
-
-        val websiteLog = logsByTable.getValue("website")
-        assertEquals("completed", websiteLog.status)
-        assertEquals(1, websiteLog.processedRows)
-        assertNull(websiteLog.cursorFrom)
-        assertNull(websiteLog.cursorTo)
-        assertTrue(websiteLog.note!!.contains("slice6 projections rebuilt"))
-
-        assertTrue(sourceLogs.none { it.status == "skipped" })
-        assertTrue(sourceLogs.none { it.note?.contains("dry-run") == true })
-        assertEquals(emptyList(), cursorWrites)
-        assertEquals(listOf("completed"), finishedStatuses)
+        assertEquals(listOf(listOf(preparedInputs.gameRows.single())), rebuiltGameRows)
+        assertEquals("completed", finishEntries.single().status)
     }
 
     @Test
@@ -219,7 +186,8 @@ class ServiceEtlServiceTest {
         val recordingTransactionManager = RecordingTransactionManager()
         val recordingService = newService(recordingTransactionManager)
         val events = recordingTransactionManager.events
-        val preparedInputs = preparedAffectedGameInputs(gameIds = linkedSetOf(11L))
+        val preparedInputs = preparedAffectedGameInputs(linkedSetOf(11L))
+        stubSlice7ValidationPass(preparedInputs)
 
         doAnswer {
             events += "ingest-load-game-statuses"
@@ -235,12 +203,8 @@ class ServiceEtlServiceTest {
         }.`when`(repository).syncGameStatuses(anyList())
         doAnswer {
             events += "calculator-calculate"
-            emptySlice6CalculationResult()
+            emptySlice7CalculationResult()
         }.`when`(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
-        doAnswer {
-            events += "service-rebuild-core"
-            null
-        }.`when`(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
 
         recordingService.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
 
@@ -259,161 +223,75 @@ class ServiceEtlServiceTest {
     }
 
     @Test
-    fun `keeps slice2 and slice6 projection sources cursorless after empty rebuild`() {
-        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(emptyPreparedAffectedGameInputs())
+    fun `retries once when validation fails and then completes`() {
+        val preparedInputs = preparedAffectedGameInputs(linkedSetOf(1L))
+        val expectedGameRow = preparedInputs.gameRows.single()
+        stubSlice7ValidationPass(preparedInputs)
+        `when`(repository.loadCurrentGameProjectionRows()).thenReturn(
+            listOf(expectedGameRow),
+            listOf(expectedGameRow.copy(name = "wrong-name")),
+            listOf(expectedGameRow),
+            listOf(expectedGameRow),
+        )
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(preparedInputs)
         `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
-            slice6CalculationResult(perTableGameIds = emptyMap())
+            slice7CalculationResult(perTableGameIds = mapOf("game" to setOf(1L)))
         )
 
-        val runId = UUID.randomUUID()
-        service.run(runId, ServiceEtlTrigger.manual())
+        service.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
 
-        assertEquals(28, sourceLogs.size)
-        val gameStatusLog = sourceLogs.first { it.tableName == "game_status" }
-        val gameLog = sourceLogs.first { it.tableName == "game" }
-        val websiteLog = sourceLogs.first { it.tableName == "website" }
-
-        assertEquals("completed", gameStatusLog.status)
-        assertEquals(0, gameStatusLog.processedRows)
-        assertNull(gameStatusLog.cursorFrom)
-        assertNull(gameStatusLog.cursorTo)
-
-        assertEquals("completed", gameLog.status)
-        assertEquals(0, gameLog.processedRows)
-        assertNull(gameLog.cursorFrom)
-        assertNull(gameLog.cursorTo)
-        assertTrue(gameLog.note!!.contains("slice6 projections rebuilt"))
-
-        assertEquals("completed", websiteLog.status)
-        assertEquals(0, websiteLog.processedRows)
-        assertNull(websiteLog.cursorFrom)
-        assertNull(websiteLog.cursorTo)
-        assertTrue(websiteLog.note!!.contains("slice6 projections rebuilt"))
-
-        verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
-        verify(repository).rebuildGameDependentBridgeProjections(
+        verify(affectedGameIdCalculator, times(2)).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+        verify(repository, times(2)).rebuildCoreGameProjections(
+            anyList(),
+            anyList(),
+            anyList(),
             anyLongSet(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-        )
-        verify(repository).rebuildGameMediaProjections(
             anyLongSet(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
+            anyLongSet(),
         )
-        assertEquals(emptyList(), cursorWrites)
-        verify(repository, never()).findCursor("game_status")
-        verify(repository, never()).findCursor("platform_logo")
-        assertEquals(listOf("completed"), finishedStatuses)
+        assertEquals(emptyList(), mismatchLogs)
+        assertEquals("completed", finishEntries.single().status)
     }
 
     @Test
-    fun `marks run failed when the first slice2 source throws`() {
+    fun `persists mismatch samples after second validation failure`() {
+        val preparedInputs = preparedAffectedGameInputs(linkedSetOf(1L))
+        stubSlice7ValidationPass(preparedInputs)
+        `when`(repository.loadCurrentGameProjectionRows()).thenReturn(
+            listOf(preparedInputs.gameRows.single().copy(name = "wrong-name"))
+        )
+        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(preparedInputs)
+        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
+            slice7CalculationResult(perTableGameIds = mapOf("game" to setOf(1L)))
+        )
+
+        val error = assertFailsWith<RuntimeException> {
+            service.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
+        }
+
+        assertTrue(error.message!!.contains("validation failed"))
+        verify(affectedGameIdCalculator, times(2)).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
+        assertTrue(mismatchLogs.isNotEmpty())
+        assertTrue(mismatchLogs.first().tableName == "service.game")
+        assertEquals("failed", finishEntries.single().status)
+        assertTrue(finishEntries.single().mismatchCount > 0)
+    }
+
+    @Test
+    fun `retries once when the first slice2 source throws and then fails`() {
         `when`(repository.syncGameStatuses(anyList())).thenThrow(RuntimeException("game_status sync failed"))
 
-        val runId = UUID.randomUUID()
-
         assertFailsWith<RuntimeException> {
-            service.run(runId, ServiceEtlTrigger.manual())
+            service.run(UUID.randomUUID(), ServiceEtlTrigger.manual())
         }
 
-        assertEquals(listOf("failed"), finishedStatuses)
-        assertEquals(emptyList(), cursorWrites)
-        assertEquals(emptyList(), sourceLogs)
-        verify(affectedGameIdCalculator).prepare(anyLong())
-        verify(affectedGameIdCalculator, never()).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
-        verify(repository, never()).rebuildCoreGameProjections(anyList(), anyList(), anyList())
-        verify(repository, never()).rebuildGameDependentBridgeProjections(
-            anyLongSet(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-        )
-        verify(repository, never()).rebuildGameMediaProjections(
-            anyLongSet(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-        )
-    }
-
-    @Test
-    fun `marks run failed when slice6 media projection rebuild throws`() {
-        `when`(affectedGameIdCalculator.prepare(anyLong())).thenReturn(
-            preparedAffectedGameInputs(gameIds = linkedSetOf(101L, 102L, 103L))
-        )
-        `when`(affectedGameIdCalculator.calculate(anyObject(PreparedAffectedGameIdInputs::class.java))).thenReturn(
-            slice6CalculationResult(
-                perTableGameIds = mapOf(
-                    "game" to setOf(101L),
-                    "release_date" to setOf(102L),
-                    "involved_company" to setOf(103L),
-                    "cover" to setOf(101L),
-                ),
-            )
-        )
-        doThrow(RuntimeException("media projection rebuild failed"))
-            .`when`(repository)
-            .rebuildGameMediaProjections(
-                anyLongSet(),
-                anyList(),
-                anyList(),
-                anyList(),
-                anyList(),
-                anyList(),
-                anyList(),
-            )
-
-        val runId = UUID.randomUUID()
-
-        assertFailsWith<RuntimeException> {
-            service.run(runId, ServiceEtlTrigger.manual())
-        }
-
-        verify(affectedGameIdCalculator).prepare(anyLong())
-        verify(affectedGameIdCalculator).calculate(anyObject(PreparedAffectedGameIdInputs::class.java))
-        verify(repository).rebuildCoreGameProjections(anyList(), anyList(), anyList())
-        verify(repository).rebuildGameDependentBridgeProjections(
-            anyLongSet(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-        )
-        verify(repository).rebuildGameMediaProjections(
-            anyLongSet(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-            anyList(),
-        )
-        assertEquals(listOf("failed"), finishedStatuses)
-        assertEquals(emptyList(), cursorWrites)
-        assertTrue(sourceLogs.none { it.tableName in SLICE6_SOURCE_TABLES })
+        verify(repository, times(2)).syncGameStatuses(anyList())
+        assertEquals(emptyList(), mismatchLogs)
+        assertEquals("failed", finishEntries.single().status)
+        assertTrue(finishEntries.single().errorMessage!!.contains("game_status sync failed"))
     }
 
     private fun stubEmptySlice2Syncs() {
@@ -457,8 +335,40 @@ class ServiceEtlServiceTest {
         `when`(repository.syncWebsiteTypes(anyList())).thenReturn(emptyCursorResult)
         `when`(repository.syncPlatformLogos(anyList())).thenReturn(emptyPlatformLogoResult)
         `when`(repository.syncPlatformTypes(anyList())).thenReturn(emptyCursorResult)
-        `when`(repository.syncPlatforms(anyList())).thenReturn(emptyCursorResult)
+        `when`(repository.syncPlatforms(anyList(), anyLongSet(), anyLongSet())).thenReturn(emptyCursorResult)
         `when`(repository.syncCompanies(anyList())).thenReturn(emptyCursorResult)
+    }
+
+    private fun stubSlice7ValidationPass(preparedInputs: PreparedAffectedGameIdInputs) {
+        val allGameIds = preparedInputs.allGameIds
+        `when`(repository.loadIds(anyObject(String::class.java))).thenAnswer { invocation ->
+            when (invocation.arguments[0] as String) {
+                "service.game" -> allGameIds
+                else -> emptySet<Long>()
+            }
+        }
+        `when`(repository.loadCurrentNamedDimensionRows(anyObject(String::class.java), anyObject(String::class.java)))
+            .thenReturn(emptyList())
+        `when`(repository.loadCurrentLanguages()).thenReturn(emptyList())
+        `when`(repository.loadCurrentRegions()).thenReturn(emptyList())
+        `when`(repository.loadCurrentReleaseStatuses()).thenReturn(emptyList())
+        `when`(repository.loadCurrentPlatformLogos()).thenReturn(emptyList())
+        `when`(repository.loadCurrentPlatforms()).thenReturn(emptyList())
+        `when`(repository.loadCurrentCompanies()).thenReturn(emptyList())
+        `when`(repository.loadCurrentGameProjectionRows()).thenReturn(preparedInputs.gameRows)
+        `when`(repository.loadCurrentGameLocalizationProjectionRows()).thenReturn(preparedInputs.gameLocalizationRows)
+        `when`(repository.loadCurrentGameReleaseProjectionRows()).thenReturn(preparedInputs.gameReleaseRows)
+        `when`(repository.loadCurrentGameLanguageProjectionRows()).thenReturn(emptyList())
+        `when`(repository.loadCurrentGameDimensionProjectionRows(anyObject(String::class.java), anyObject(String::class.java)))
+            .thenReturn(emptyList())
+        `when`(repository.loadCurrentGameCompanyProjectionRows()).thenReturn(emptyList())
+        `when`(repository.loadCurrentGameRelationProjectionRows()).thenReturn(emptyList())
+        `when`(repository.loadCurrentCoverProjectionRows()).thenReturn(preparedInputs.coverRows)
+        `when`(repository.loadCurrentArtworkProjectionRows()).thenReturn(preparedInputs.artworkRows)
+        `when`(repository.loadCurrentScreenshotProjectionRows()).thenReturn(preparedInputs.screenshotRows)
+        `when`(repository.loadCurrentGameVideoProjectionRows()).thenReturn(preparedInputs.gameVideoRows)
+        `when`(repository.loadCurrentWebsiteProjectionRows()).thenReturn(preparedInputs.websiteRows)
+        `when`(repository.loadCurrentAlternativeNameProjectionRows()).thenReturn(preparedInputs.alternativeNameRows)
     }
 
     private fun emptyPreparedAffectedGameInputs(): PreparedAffectedGameIdInputs =
@@ -495,84 +405,40 @@ class ServiceEtlServiceTest {
             gamePlayerPerspectiveRows = emptyList(),
             gameModeRows = emptyList(),
             gameKeywordRows = emptyList(),
-            gameCompanyRows = gameIds.map { gameId ->
-                GameCompanyProjectionRow(
-                    gameId = gameId,
-                    companyId = gameId + 1000,
-                    isDeveloper = true,
-                    isPublisher = false,
-                    isPorting = false,
-                    isSupporting = false,
-                )
-            },
+            gameCompanyRows = emptyList(),
             gameRelationRows = emptyList(),
-            coverRows = gameIds.map { gameId ->
-                CoverProjectionRow(
-                    id = gameId + 2000,
-                    gameId = gameId,
-                    gameLocalizationId = gameId,
-                    imageId = "cover-$gameId",
-                    url = "https://example.com/cover-$gameId",
-                    isMain = true,
-                )
-            },
-            artworkRows = gameIds.map { gameId ->
-                ArtworkProjectionRow(
-                    id = gameId + 3000,
-                    gameId = gameId,
-                    imageId = "artwork-$gameId",
-                    url = "https://example.com/artwork-$gameId",
-                )
-            },
-            screenshotRows = gameIds.map { gameId ->
-                ScreenshotProjectionRow(
-                    id = gameId + 4000,
-                    gameId = gameId,
-                    imageId = "screenshot-$gameId",
-                    url = "https://example.com/screenshot-$gameId",
-                )
-            },
-            gameVideoRows = gameIds.map { gameId ->
-                GameVideoProjectionRow(
-                    id = gameId + 5000,
-                    gameId = gameId,
-                    name = "video-$gameId",
-                    videoId = "vid-$gameId",
-                )
-            },
-            websiteRows = gameIds.map { gameId ->
-                WebsiteProjectionRow(
-                    id = gameId + 6000,
-                    gameId = gameId,
-                    typeId = null,
-                    url = "https://example.com/site-$gameId",
-                    isTrusted = true,
-                )
-            },
-            alternativeNameRows = gameIds.map { gameId ->
-                AlternativeNameProjectionRow(
-                    id = gameId + 7000,
-                    gameId = gameId,
-                    name = "alt-$gameId",
-                    comment = "comment-$gameId",
-                )
-            },
+            coverRows = gameIds.map(::coverRow),
+            artworkRows = gameIds.map(::artworkRow),
+            screenshotRows = gameIds.map(::screenshotRow),
+            gameVideoRows = gameIds.map(::gameVideoRow),
+            websiteRows = gameIds.map(::websiteRow),
+            alternativeNameRows = gameIds.map(::alternativeNameRow),
         )
 
-    private fun emptySlice6CalculationResult(): AffectedGameIdCalculationResult =
-        slice6CalculationResult(perTableGameIds = emptyMap())
+    private fun emptySlice7CalculationResult(): AffectedGameIdCalculationResult =
+        slice7CalculationResult(emptyMap())
 
-    private fun slice6CalculationResult(
-        perTableGameIds: Map<String, Set<Long>>,
-        noteByTable: Map<String, String> = emptyMap(),
-    ): AffectedGameIdCalculationResult {
-        val sourceResults = SLICE6_SOURCE_TABLES.map { tableName ->
+    private fun slice7CalculationResult(perTableGameIds: Map<String, Set<Long>>): AffectedGameIdCalculationResult {
+        val sourceTables = listOf(
+            "game",
+            "release_date",
+            "involved_company",
+            "language_support",
+            "game_localization",
+            "cover",
+            "artwork",
+            "screenshot",
+            "game_video",
+            "website",
+            "alternative_name",
+        )
+        val sourceResults = sourceTables.map { tableName ->
             AffectedGameIdSourceResult(
                 tableName = tableName,
                 cursorFrom = null,
                 cursorTo = null,
                 affectedGameIds = perTableGameIds[tableName].orEmpty(),
-                note = noteByTable[tableName] ?: "slice6 projection diff test note",
+                note = "slice7 projection diff test note",
                 materializedInCurrentSlice = true,
                 advanceCursor = false,
             )
@@ -617,6 +483,51 @@ class ServiceEtlServiceTest {
         name = "loc-$gameId",
     )
 
+    private fun coverRow(gameId: Long) = CoverProjectionRow(
+        id = gameId + 1000,
+        gameId = gameId,
+        gameLocalizationId = gameId,
+        imageId = "cover-$gameId",
+        url = "https://example.com/cover-$gameId",
+        isMain = true,
+    )
+
+    private fun artworkRow(gameId: Long) = ArtworkProjectionRow(
+        id = gameId + 2000,
+        gameId = gameId,
+        imageId = "artwork-$gameId",
+        url = "https://example.com/artwork-$gameId",
+    )
+
+    private fun screenshotRow(gameId: Long) = ScreenshotProjectionRow(
+        id = gameId + 3000,
+        gameId = gameId,
+        imageId = "screenshot-$gameId",
+        url = "https://example.com/screenshot-$gameId",
+    )
+
+    private fun gameVideoRow(gameId: Long) = GameVideoProjectionRow(
+        id = gameId + 4000,
+        gameId = gameId,
+        name = "video-$gameId",
+        videoId = "video-$gameId",
+    )
+
+    private fun websiteRow(gameId: Long) = WebsiteProjectionRow(
+        id = gameId + 5000,
+        gameId = gameId,
+        typeId = null,
+        url = "https://example.com/site-$gameId",
+        isTrusted = true,
+    )
+
+    private fun alternativeNameRow(gameId: Long) = AlternativeNameProjectionRow(
+        id = gameId + 6000,
+        gameId = gameId,
+        name = "alt-$gameId",
+        comment = "comment-$gameId",
+    )
+
     private fun newService(transactionManager: AbstractPlatformTransactionManager): ServiceEtlService =
         ServiceEtlService(
             ingestEtlReadJdbcRepository = ingestRepository,
@@ -638,6 +549,12 @@ class ServiceEtlServiceTest {
     }
 
     @Suppress("UNCHECKED_CAST")
+    private fun anyLongMap(): Map<Long, Long> {
+        org.mockito.ArgumentMatchers.anyMap<Long, Long>()
+        return emptyMap()
+    }
+
+    @Suppress("UNCHECKED_CAST")
     private fun <T> anyList(): List<T> {
         org.mockito.ArgumentMatchers.anyList<T>()
         return emptyList()
@@ -648,6 +565,12 @@ class ServiceEtlServiceTest {
         org.mockito.ArgumentMatchers.nullable(type)
         return null
     }
+
+    private data class FinishEntry(
+        val status: String,
+        val mismatchCount: Int,
+        val errorMessage: String?,
+    )
 
     private class NoOpTransactionManager : AbstractPlatformTransactionManager() {
         override fun doGetTransaction(): Any = Any()

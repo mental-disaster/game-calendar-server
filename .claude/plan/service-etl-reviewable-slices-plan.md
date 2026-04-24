@@ -510,6 +510,25 @@
 
 ## Slice 7. 삭제, 검증, 재시도 마감
 
+### 현재 상태
+
+승인.
+
+정리:
+
+- 루트 game 차집합 삭제, mismatch 총건수/샘플 기록, 최종 실패 시 mismatch 로그 저장, 1회 자동 재시도 골격이 구현되었다.
+- `findSharedDimensionDeletionAffectedGameIds()`가 shared-dimension deletion fallout을 별도로 계산해 affected/revalidation 범위에 합친다.
+- 재구성 단계는 최신 Slice 2 ID 집합을 `available*Ids`로 전달해 stale FK를 null 처리하거나 drop 하도록 정리되었다.
+- 실행 순서는 rebuild -> root game delete -> shared dimension prune -> validateFinalState이며, 차원 삭제로 영향받는 game도 재구성 및 validation 범위에 포함된다.
+- 따라서 Slice 7 승인 기준 중 `공용 차원 삭제 시 참조 정리 후 고아 삭제`와 `shared-dimension deletion 영향 게임 포함`은 현재 구현에서 충족된다.
+
+### 후속 메모
+
+- Slice 7의 가장 위험한 경계는 FK, cascade, rollback, retry 상호작용인데 현재 검증은 mock 서비스 테스트에 비중이 크다.
+- `game_status`, `website_type`, `platform/logo`, `company` 삭제 fallout, 루트 game 삭제 cascade, mismatch 100건 초과 샘플 제한은 Testcontainers/Flyway 통합 테스트로 고정하는 편이 안전하다.
+- 현재 구현은 source cursor를 전진시키는 형태보다 cursorless diff 전략에 가깝기 때문에, 승인 기준의 cursor 문구는 장기적으로 문서 정리가 필요할 수 있다.
+- `SLICE7_GAME_PROJECTION_NOTE`를 모든 source log에 일괄 append하는 방식과 mismatch 상세 `toString()` 저장은 운영 가독성 측면에서 후속 개선 여지가 있다.
+
 ### 목표
 
 정합성 보증과 실패 복구를 마무리한다.
@@ -536,6 +555,8 @@
 - mismatch가 1건이라도 있으면 전체 롤백된다.
 - 자동 재시도는 1회만 수행된다.
 - 재시도 후에도 실패하면 최종 실패와 상세 로그가 남는다.
+- 공용 차원 삭제는 이를 참조하는 projection이 먼저 정리된 뒤에만 실행된다.
+- shared-dimension deletion으로 영향받는 game도 재구성 및 validation 범위에 포함된다.
 - 성공 시에만 커서가 전진한다.
 
 ## 권장 구현 순서

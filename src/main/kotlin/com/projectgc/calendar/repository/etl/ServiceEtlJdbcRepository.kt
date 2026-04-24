@@ -103,6 +103,29 @@ class ServiceEtlJdbcRepository(
         )
     }
 
+    fun insertMismatchLogs(entries: List<ServiceEtlMismatchLogEntry>) {
+        if (entries.isEmpty()) {
+            return
+        }
+        jdbc.batchUpdate(
+            """
+            INSERT INTO service.etl_mismatch_log
+                (run_id, table_name, mismatch_type, expected_value, actual_value, details, recorded_at)
+            VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), ?)
+            """.trimIndent(),
+            entries,
+            BATCH_SIZE,
+        ) { ps, entry ->
+            ps.setObject(1, entry.runId)
+            ps.setNullableString(2, entry.tableName)
+            ps.setString(3, entry.mismatchType)
+            ps.setNullableString(4, entry.expectedValue)
+            ps.setNullableString(5, entry.actualValue)
+            ps.setNullableString(6, entry.detailsJson)
+            ps.setTimestamp(7, Timestamp.from(entry.recordedAt))
+        }
+    }
+
     fun syncGameStatuses(sourceRows: List<NamedDimensionRow>) = syncNamedDimensionByDiff(
         sourceRows = sourceRows,
         targetTable = "game_status",
@@ -251,11 +274,15 @@ class ServiceEtlJdbcRepository(
         targetValueColumn = "name",
     )
 
-    fun syncPlatforms(sourceRows: List<PlatformSyncRow>): ServiceEtlTableSyncResult {
+    fun syncPlatforms(
+        sourceRows: List<PlatformSyncRow>,
+        availableLogoIds: Set<Long> = loadIds("service.platform_logo"),
+        availableTypeIds: Set<Long> = loadIds("service.platform_type"),
+    ): ServiceEtlTableSyncResult {
         val resolvedRows = resolvePlatformReferences(
             rows = sourceRows,
-            availableLogoIds = loadIds("service.platform_logo"),
-            availableTypeIds = loadIds("service.platform_type"),
+            availableLogoIds = availableLogoIds,
+            availableTypeIds = availableTypeIds,
         )
         val existingById = loadCurrentPlatformsById()
         val changedRows = resolvedRows.filter { existingById[it.id] != it }
@@ -317,6 +344,66 @@ class ServiceEtlJdbcRepository(
 
     fun loadIds(tableName: String): Set<Long> =
         jdbc.query("SELECT id FROM $tableName") { rs, _ -> rs.getLong("id") }.toSet()
+
+    fun deleteIds(tableName: String, ids: Set<Long>) {
+        if (ids.isEmpty()) {
+            return
+        }
+        ids.toList().chunked(PROJECTION_QUERY_CHUNK_SIZE).forEach { chunk ->
+            val placeholders = chunk.joinToString(",") { "?" }
+            jdbc.update(
+                "DELETE FROM $tableName WHERE id IN ($placeholders)",
+                *chunk.toTypedArray(),
+            )
+        }
+    }
+
+    fun loadCurrentNamedDimensionRows(
+        tableName: String,
+        targetValueColumn: String,
+    ): List<NamedDimensionRow> =
+        jdbc.query(
+            """
+            SELECT id, $targetValueColumn AS value
+            FROM service.$tableName
+            ORDER BY id
+            """.trimIndent(),
+        ) { rs, _ ->
+            NamedDimensionRow(
+                id = rs.getLong("id"),
+                value = rs.getString("value"),
+            )
+        }
+
+    fun loadCurrentLanguages(): List<LanguageRow> =
+        loadCurrentLanguagesById()
+            .values
+            .sortedBy { it.id }
+
+    fun loadCurrentRegions(): List<RegionRow> =
+        loadCurrentRegionsById()
+            .values
+            .sortedBy { it.id }
+
+    fun loadCurrentReleaseStatuses(): List<ReleaseStatusRow> =
+        loadCurrentReleaseStatusesById()
+            .values
+            .sortedBy { it.id }
+
+    fun loadCurrentPlatformLogos(): List<PlatformLogoRow> =
+        loadCurrentPlatformLogosById()
+            .values
+            .sortedBy { it.id }
+
+    fun loadCurrentPlatforms(): List<PlatformSyncRow> =
+        loadCurrentPlatformsById()
+            .values
+            .sortedBy { it.id }
+
+    fun loadCurrentCompanies(): List<CompanySyncRow> =
+        loadCurrentCompaniesById()
+            .values
+            .sortedBy { it.id }
 
     fun loadCurrentGameProjectionRows(): List<GameProjectionRow> =
         jdbc.query(
@@ -566,6 +653,12 @@ class ServiceEtlJdbcRepository(
         gameRows: List<GameProjectionRow>,
         gameLocalizationRows: List<GameLocalizationProjectionRow>,
         gameReleaseRows: List<GameReleaseProjectionRow>,
+        availableStatusIds: Set<Long> = loadIds("service.game_status"),
+        availableTypeIds: Set<Long> = loadIds("service.game_type"),
+        availableRegionIds: Set<Long> = loadIds("service.region"),
+        availablePlatformIds: Set<Long> = loadIds("service.platform"),
+        availableReleaseRegionIds: Set<Long> = loadIds("service.release_region"),
+        availableReleaseStatusIds: Set<Long> = loadIds("service.release_status"),
     ) {
         val materializedGameIds = gameRows.mapTo(linkedSetOf()) { it.id }
         if (materializedGameIds.isEmpty()) {
@@ -574,8 +667,8 @@ class ServiceEtlJdbcRepository(
 
         val resolvedGameRows = resolveGameReferences(
             rows = gameRows,
-            availableStatusIds = loadIds("service.game_status"),
-            availableTypeIds = loadIds("service.game_type"),
+            availableStatusIds = availableStatusIds,
+            availableTypeIds = availableTypeIds,
         )
         batchUpsert(
             """
@@ -612,7 +705,7 @@ class ServiceEtlJdbcRepository(
         val resolvedGameLocalizationRows = resolveGameLocalizationReferences(
             rows = gameLocalizationRows,
             availableGameIds = materializedGameIds,
-            availableRegionIds = loadIds("service.region"),
+            availableRegionIds = availableRegionIds,
         )
         batchUpsert(
             """
@@ -631,9 +724,9 @@ class ServiceEtlJdbcRepository(
         val resolvedGameReleaseRows = resolveGameReleaseReferences(
             rows = gameReleaseRows,
             availableGameIds = materializedGameIds,
-            availablePlatformIds = loadIds("service.platform"),
-            availableRegionIds = loadIds("service.release_region"),
-            availableStatusIds = loadIds("service.release_status"),
+            availablePlatformIds = availablePlatformIds,
+            availableRegionIds = availableReleaseRegionIds,
+            availableStatusIds = availableReleaseStatusIds,
         )
         batchUpsert(
             """
@@ -665,18 +758,24 @@ class ServiceEtlJdbcRepository(
         gameKeywordRows: List<GameDimensionProjectionRow>,
         gameCompanyRows: List<GameCompanyProjectionRow>,
         gameRelationRows: List<GameRelationProjectionRow>,
+        availableGameIds: Set<Long> = loadIds("service.game"),
+        availableLanguageIds: Set<Long> = loadIds("service.language"),
+        availableGenreIds: Set<Long> = loadIds("service.genre"),
+        availableThemeIds: Set<Long> = loadIds("service.theme"),
+        availablePlayerPerspectiveIds: Set<Long> = loadIds("service.player_perspective"),
+        availableGameModeIds: Set<Long> = loadIds("service.game_mode"),
+        availableKeywordIds: Set<Long> = loadIds("service.keyword"),
+        availableCompanyIds: Set<Long> = loadIds("service.company"),
     ) {
         if (materializedGameIds.isEmpty()) {
             return
         }
 
-        val availableGameIds = loadIds("service.game")
-
         deleteByGameIds("service.game_language", materializedGameIds)
         val resolvedGameLanguageRows = resolveGameLanguageReferences(
             rows = gameLanguageRows,
             availableGameIds = availableGameIds,
-            availableLanguageIds = loadIds("service.language"),
+            availableLanguageIds = availableLanguageIds,
         )
         batchUpsert(
             """
@@ -699,7 +798,7 @@ class ServiceEtlJdbcRepository(
             materializedGameIds = materializedGameIds,
             sourceRows = gameGenreRows,
             availableGameIds = availableGameIds,
-            availableDimensionIds = loadIds("service.genre"),
+            availableDimensionIds = availableGenreIds,
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_theme",
@@ -707,7 +806,7 @@ class ServiceEtlJdbcRepository(
             materializedGameIds = materializedGameIds,
             sourceRows = gameThemeRows,
             availableGameIds = availableGameIds,
-            availableDimensionIds = loadIds("service.theme"),
+            availableDimensionIds = availableThemeIds,
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_player_perspective",
@@ -715,7 +814,7 @@ class ServiceEtlJdbcRepository(
             materializedGameIds = materializedGameIds,
             sourceRows = gamePlayerPerspectiveRows,
             availableGameIds = availableGameIds,
-            availableDimensionIds = loadIds("service.player_perspective"),
+            availableDimensionIds = availablePlayerPerspectiveIds,
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_game_mode",
@@ -723,7 +822,7 @@ class ServiceEtlJdbcRepository(
             materializedGameIds = materializedGameIds,
             sourceRows = gameModeRows,
             availableGameIds = availableGameIds,
-            availableDimensionIds = loadIds("service.game_mode"),
+            availableDimensionIds = availableGameModeIds,
         )
         rebuildGameArrayBridgeProjection(
             tableName = "service.game_keyword",
@@ -731,14 +830,14 @@ class ServiceEtlJdbcRepository(
             materializedGameIds = materializedGameIds,
             sourceRows = gameKeywordRows,
             availableGameIds = availableGameIds,
-            availableDimensionIds = loadIds("service.keyword"),
+            availableDimensionIds = availableKeywordIds,
         )
 
         deleteByGameIds("service.game_company", materializedGameIds)
         val resolvedGameCompanyRows = resolveGameCompanyReferences(
             rows = gameCompanyRows,
             availableGameIds = availableGameIds,
-            availableCompanyIds = loadIds("service.company"),
+            availableCompanyIds = availableCompanyIds,
         )
         batchUpsert(
             """
@@ -782,14 +881,14 @@ class ServiceEtlJdbcRepository(
         gameVideoRows: List<GameVideoProjectionRow>,
         websiteRows: List<WebsiteProjectionRow>,
         alternativeNameRows: List<AlternativeNameProjectionRow>,
+        availableGameIds: Set<Long> = loadIds("service.game"),
+        availableGameLocalizationsById: Map<Long, Long> = loadCurrentGameLocalizationProjectionRows()
+            .associate { it.id to it.gameId },
+        availableWebsiteTypeIds: Set<Long> = loadIds("service.website_type"),
     ) {
         if (materializedGameIds.isEmpty()) {
             return
         }
-
-        val availableGameIds = loadIds("service.game")
-        val availableGameLocalizationsById = loadCurrentGameLocalizationProjectionRows()
-            .associate { it.id to it.gameId }
 
         deleteByGameIds("service.cover", materializedGameIds)
         val resolvedCoverRows = resolveCoverReferences(
@@ -873,7 +972,7 @@ class ServiceEtlJdbcRepository(
             resolvedRows = resolveWebsiteReferences(
                 rows = websiteRows,
                 availableGameIds = availableGameIds,
-                availableTypeIds = loadIds("service.website_type"),
+                availableTypeIds = availableWebsiteTypeIds,
             ),
             sql = """
                 INSERT INTO service.website (id, game_id, type_id, url, is_trusted)
@@ -1164,6 +1263,16 @@ data class ServiceEtlSourceLogEntry(
     val note: String?,
     val startedAt: Instant,
     val finishedAt: Instant,
+)
+
+data class ServiceEtlMismatchLogEntry(
+    val runId: UUID,
+    val tableName: String?,
+    val mismatchType: String,
+    val expectedValue: String?,
+    val actualValue: String?,
+    val detailsJson: String?,
+    val recordedAt: Instant,
 )
 
 data class ServiceEtlTableSyncResult(

@@ -17,7 +17,9 @@
 - Slice 5 game 종속 bridge projection 재구성도 승인 완료 상태다.
 - Slice 5A DB 분리 대응도 승인 완료 상태다.
 - Slice 6 미디어/부가 projection 재구성도 승인 완료 상태다.
-- 다음 작업 시작점은 Slice 7 삭제, 검증, 재시도 마감이다.
+- Slice 7 삭제, 검증, 재시도 마감도 승인 완료 상태다.
+- Service ETL의 Slice 1~7 구현은 모두 완료 상태다.
+- 다음 작업 시작점은 신규 기능 구현이 아니라 운영 데이터 기준 정합성 관찰과 통합 테스트 보강이다.
 - Slice 5 승인 이후에는 `Slice 5A. DB 분리 대응: Datasource/Repository 분리`를 선행했고, 그 이후 Slice 6까지 구현 완료된 상태다.
 - Slice 1 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
 - Slice 2 관련 잔여 이슈는 모두 non-blocking 후속 개선 항목으로 관리한다.
@@ -67,6 +69,14 @@
 - 우선순위가 높은 보강 대상은 `cover.is_main`, media stale row 제거, `website.type_id` null 정리, `alternative_name.comment` 매핑이다.
 - 현재 integration test는 수기 스키마 기반이어서, 장기적으로는 실제 Flyway 스키마 기준 검증으로 옮기는 편이 안전하다.
 - `processedRows`는 media row 수가 아니라 source별 affected game 수라는 의미로 기록된다는 점을 운영 로그 해석에서 주의해야 한다.
+
+### Slice 7 후속 메모
+
+- shared-dimension deletion fallout은 현재 `findSharedDimensionDeletionAffectedGameIds()`로 rebuild/validation 범위에 포함되도록 보강된 상태다.
+- 다만 Slice 7의 핵심 위험 구간은 여전히 FK, rollback, retry 상호작용이므로 mock 서비스 테스트 외에 repository/service 통합 테스트 비중을 높이는 편이 안전하다.
+- 우선순위가 높은 후속 통합 테스트는 `game_status`, `website_type`, `platform/logo`, `company` 삭제 fallout과 루트 game 삭제 cascade, mismatch 100건 초과 샘플 제한이다.
+- 현재 구현은 cursorless diff 전략에 가깝기 때문에, 계획 문서의 `성공 시에만 커서가 전진한다` 문구는 장기적으로 실제 동작에 맞게 정리할 필요가 있다.
+- `SLICE7_GAME_PROJECTION_NOTE`를 모든 source log note에 일괄 append하는 방식과 mismatch 상세 `toString()` 저장은 운영 가독성 측면에서 후속 개선 여지가 있다.
 
 ## 2. 확정 제약사항
 
