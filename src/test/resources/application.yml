@@ -1,0 +1,30 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+
+  sql:
+    init:
+      mode: never
+
+  flyway:
+    enabled: false
+
+igdb:
+  client-id: test-client-id
+  client-secret: test-client-secret
+  auth-url: https://id.twitch.tv/oauth2/token
+  base-url: https://api.igdb.com/v4
+  filter:
+    game-types: [0, 1, 2, 4, 6, 7, 8, 9]
+    min-first-release-date: 1577836800
+
+batch:
+  sync:
+    cron: "0 0 3 * * *"

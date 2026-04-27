@@ -21,6 +21,12 @@ class ModuleBoundariesTest {
         .because("배치 계층은 웹 캘린더 모듈에 의존하지 않아야 합니다.")
 
     @ArchTest
+    val batchDoesNotDependOnOrchestration = noClasses()
+        .that().resideInAPackage("com.projectgc.batch..")
+        .should().dependOnClassesThat().resideInAPackage("com.projectgc.orchestration..")
+        .because("배치 계층은 orchestration 계층에 직접 의존하지 않아야 합니다.")
+
+    @ArchTest
     val calendarDoesNotDependOnBatch = noClasses()
         .that().resideInAPackage("com.projectgc.calendar..")
         .should().dependOnClassesThat().resideInAPackage("com.projectgc.batch..")

@@ -1,6 +1,7 @@
 HELP.md
 AGENTS.md
 .gradle
+.gradle-local/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/
@@ -42,3 +43,8 @@ out/
 
 # Local Spring configuration (contains per-developer secrets)
 src/main/resources/application.yml
+
+# AI Agent
+AGENT.md
+CLAUDE.md
+GEMINI.md
