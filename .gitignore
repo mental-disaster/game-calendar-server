@@ -41,4 +41,4 @@ out/
 .kotlin
 
 # Local Spring configuration (contains per-developer secrets)
-src/main/resources/application.properties
+src/main/resources/application.yml
