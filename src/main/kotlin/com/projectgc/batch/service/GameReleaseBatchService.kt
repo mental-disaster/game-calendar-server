@@ -6,7 +6,9 @@ import com.projectgc.batch.client.IgdbClient.Companion.PAGE_SIZE
 import com.projectgc.batch.models.entity.ingest.IngestSyncCursorEntity
 import com.projectgc.batch.models.mapper.*
 import com.projectgc.batch.repository.ingest.IngestRepositories
+import com.projectgc.shared.event.IngestSyncSucceededEvent
 import org.slf4j.LoggerFactory
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.domain.PageRequest
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
@@ -19,8 +21,19 @@ class GameReleaseBatchService(
     private val igdbClient: IgdbClient,
     private val mediaSync: MediaSyncService,
     private val repos: IngestRepositories,
+    private val eventPublisher: ApplicationEventPublisher,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    private class PartialIngestSyncFailureException(
+        val failedTables: List<String>,
+    ) : RuntimeException("IGDB 동기화 부분 실패: ${failedTables.joinToString(", ")}")
+
+    private class LoopGuardExceededException(
+        tableName: String,
+        guard: Int,
+        scope: String,
+    ) : RuntimeException("[$tableName] $scope 최대 반복 횟수($guard) 초과")
 
     companion object {
         // [K] PAGE_SIZE(IGDB 응답 한도)와 동일하게 설정 — 청크당 최대 1페이지로 직관적
@@ -38,29 +51,33 @@ class GameReleaseBatchService(
         val syncStartedAt = Instant.now().epochSecond
         val startTime = Instant.now()
         val syncId = UUID.randomUUID()
+        var syncLogInserted = false
+        var successEvent: IngestSyncSucceededEvent? = null
         log.info("IGDB 전체 동기화 시작 (syncId=$syncId)")
 
-        repos.jdbc.insertSyncLog(syncId, startTime)
+        try {
+            repos.jdbc.insertSyncLog(syncId, startTime)
+            syncLogInserted = true
 
-        runCatching {
+            val failedTables = mutableListOf<String>()
+
             // 1. 참조 테이블 (소량, 단일 호출)
-            // [C] 각 테이블 독립 격리 — 하나 실패해도 다음 테이블 계속 진행
-            runCatching { syncReference("genre",                syncId, syncStartedAt, { igdbClient.fetchGenres() })                { r -> repos.jdbc.upsertGenres(r.items.map { it.toGenreEntity() }) } }.onFailure { log.error("[genre] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("theme",                syncId, syncStartedAt, { igdbClient.fetchThemes() })                { r -> repos.jdbc.upsertThemes(r.items.map { it.toThemeEntity() }) } }.onFailure { log.error("[theme] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("player_perspective",   syncId, syncStartedAt, { igdbClient.fetchPlayerPerspectives() })    { r -> repos.jdbc.upsertPlayerPerspectives(r.items.map { it.toPlayerPerspectiveEntity() }) } }.onFailure { log.error("[player_perspective] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("game_mode",            syncId, syncStartedAt, { igdbClient.fetchGameModes() })             { r -> repos.jdbc.upsertGameModes(r.items.map { it.toGameModeEntity() }) } }.onFailure { log.error("[game_mode] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("language_support_type",syncId, syncStartedAt, { igdbClient.fetchLanguageSupportTypes() }) { r -> repos.jdbc.upsertLanguageSupportTypes(r.items.map { it.toLanguageSupportTypeEntity() }) } }.onFailure { log.error("[language_support_type] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("platform_type",        syncId, syncStartedAt, { igdbClient.fetchPlatformTypes() })        { r -> repos.jdbc.upsertPlatformTypes(r.items.map { it.toPlatformTypeEntity() }) } }.onFailure { log.error("[platform_type] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("website_type",         syncId, syncStartedAt, { igdbClient.fetchWebsiteTypes() })         { r -> repos.jdbc.upsertWebsiteTypes(r.items.map { it.toEntity() }) } }.onFailure { log.error("[website_type] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("game_status",          syncId, syncStartedAt, { igdbClient.fetchGameStatuses() })         { r -> repos.jdbc.upsertGameStatuses(r.items.map { it.toEntity() }) } }.onFailure { log.error("[game_status] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("game_type",            syncId, syncStartedAt, { igdbClient.fetchGameTypes() })            { r -> repos.jdbc.upsertGameTypes(r.items.map { it.toEntity() }) } }.onFailure { log.error("[game_type] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("language",             syncId, syncStartedAt, { igdbClient.fetchLanguages() })            { r -> repos.jdbc.upsertLanguages(r.items.map { it.toEntity() }) } }.onFailure { log.error("[language] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("region",               syncId, syncStartedAt, { igdbClient.fetchRegions() })              { r -> repos.jdbc.upsertRegions(r.items.map { it.toEntity() }) } }.onFailure { log.error("[region] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("release_date_region",  syncId, syncStartedAt, { igdbClient.fetchReleaseDateRegions() })   { r -> repos.jdbc.upsertReleaseDateRegions(r.items.map { it.toEntity() }) } }.onFailure { log.error("[release_date_region] 동기화 실패: ${it.message}", it) }
-            runCatching { syncReference("release_date_status",  syncId, syncStartedAt, { igdbClient.fetchReleaseDateStatuses() })  { r -> repos.jdbc.upsertReleaseDateStatuses(r.items.map { it.toEntity() }) } }.onFailure { log.error("[release_date_status] 동기화 실패: ${it.message}", it) }
+            captureTableFailure(failedTables, "genre") { syncReference("genre", syncId, syncStartedAt, { igdbClient.fetchGenres() }) { r -> repos.jdbc.upsertGenres(r.items.map { it.toGenreEntity() }) } }
+            captureTableFailure(failedTables, "theme") { syncReference("theme", syncId, syncStartedAt, { igdbClient.fetchThemes() }) { r -> repos.jdbc.upsertThemes(r.items.map { it.toThemeEntity() }) } }
+            captureTableFailure(failedTables, "player_perspective") { syncReference("player_perspective", syncId, syncStartedAt, { igdbClient.fetchPlayerPerspectives() }) { r -> repos.jdbc.upsertPlayerPerspectives(r.items.map { it.toPlayerPerspectiveEntity() }) } }
+            captureTableFailure(failedTables, "game_mode") { syncReference("game_mode", syncId, syncStartedAt, { igdbClient.fetchGameModes() }) { r -> repos.jdbc.upsertGameModes(r.items.map { it.toGameModeEntity() }) } }
+            captureTableFailure(failedTables, "language_support_type") { syncReference("language_support_type", syncId, syncStartedAt, { igdbClient.fetchLanguageSupportTypes() }) { r -> repos.jdbc.upsertLanguageSupportTypes(r.items.map { it.toLanguageSupportTypeEntity() }) } }
+            captureTableFailure(failedTables, "platform_type") { syncReference("platform_type", syncId, syncStartedAt, { igdbClient.fetchPlatformTypes() }) { r -> repos.jdbc.upsertPlatformTypes(r.items.map { it.toPlatformTypeEntity() }) } }
+            captureTableFailure(failedTables, "website_type") { syncReference("website_type", syncId, syncStartedAt, { igdbClient.fetchWebsiteTypes() }) { r -> repos.jdbc.upsertWebsiteTypes(r.items.map { it.toEntity() }) } }
+            captureTableFailure(failedTables, "game_status") { syncReference("game_status", syncId, syncStartedAt, { igdbClient.fetchGameStatuses() }) { r -> repos.jdbc.upsertGameStatuses(r.items.map { it.toEntity() }) } }
+            captureTableFailure(failedTables, "game_type") { syncReference("game_type", syncId, syncStartedAt, { igdbClient.fetchGameTypes() }) { r -> repos.jdbc.upsertGameTypes(r.items.map { it.toEntity() }) } }
+            captureTableFailure(failedTables, "language") { syncReference("language", syncId, syncStartedAt, { igdbClient.fetchLanguages() }) { r -> repos.jdbc.upsertLanguages(r.items.map { it.toEntity() }) } }
+            captureTableFailure(failedTables, "region") { syncReference("region", syncId, syncStartedAt, { igdbClient.fetchRegions() }) { r -> repos.jdbc.upsertRegions(r.items.map { it.toEntity() }) } }
+            captureTableFailure(failedTables, "release_date_region") { syncReference("release_date_region", syncId, syncStartedAt, { igdbClient.fetchReleaseDateRegions() }) { r -> repos.jdbc.upsertReleaseDateRegions(r.items.map { it.toEntity() }) } }
+            captureTableFailure(failedTables, "release_date_status") { syncReference("release_date_status", syncId, syncStartedAt, { igdbClient.fetchReleaseDateStatuses() }) { r -> repos.jdbc.upsertReleaseDateStatuses(r.items.map { it.toEntity() }) } }
 
             // 2. game — 미디어 동기화가 DB의 game ID에 의존하므로 반드시 먼저 실행
-            runCatching {
+            captureTableFailure(failedTables, "game") {
                 syncWithCursor("game", syncId, syncStartedAt) { cursor, lastId ->
                     val result = igdbClient.fetchGames(cursor, lastId)
                     fetched += result.fetched
@@ -69,52 +86,127 @@ class GameReleaseBatchService(
                     repos.jdbc.upsertGames(result.items.map { it.toEntity() })
                     if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
                 }
-            }.onFailure { log.error("[game] 동기화 실패: ${it.message}", it) }
+            }
 
             // 3. 나머지 커서 기반 (updated_at 있음)
-            // release_date / involved_company / language_support / game_localization — game 필터로 스코프 제한
-            runCatching { syncWithCursor("release_date", syncId, syncStartedAt)      { cursor, lastId -> val r = igdbClient.fetchReleaseDates(cursor, lastId);      fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors; repos.jdbc.upsertReleaseDates(r.items.map { it.toEntity() });      if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null } }.onFailure { log.error("[release_date] 동기화 실패: ${it.message}", it) }
-            runCatching { syncWithCursor("platform", syncId, syncStartedAt)          { cursor, lastId -> val r = igdbClient.fetchPlatforms(cursor, lastId);          fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors; repos.jdbc.upsertPlatforms(r.items.map { it.toEntity() });          if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null } }.onFailure { log.error("[platform] 동기화 실패: ${it.message}", it) }
-            runCatching { syncWithCursor("involved_company", syncId, syncStartedAt)  { cursor, lastId -> val r = igdbClient.fetchInvolvedCompanies(cursor, lastId);  fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors; repos.jdbc.upsertInvolvedCompanies(r.items.map { it.toEntity() });  if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null } }.onFailure { log.error("[involved_company] 동기화 실패: ${it.message}", it) }
-            // company — involved_company 수집 완료 후 DB의 company ID 기반으로 수집
-            runCatching { syncCompaniesByInvolvedCompanyIds(syncId, syncStartedAt) }.onFailure { log.error("[company] 동기화 실패: ${it.message}", it) }
-            runCatching { syncWithCursor("language_support", syncId, syncStartedAt)  { cursor, lastId -> val r = igdbClient.fetchLanguageSupports(cursor, lastId);  fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors; repos.jdbc.upsertLanguageSupports(r.items.map { it.toEntity() });  if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null } }.onFailure { log.error("[language_support] 동기화 실패: ${it.message}", it) }
-            runCatching { syncWithCursor("game_localization", syncId, syncStartedAt) { cursor, lastId -> val r = igdbClient.fetchGameLocalizations(cursor, lastId); fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors; repos.jdbc.upsertGameLocalizations(r.items.map { it.toEntity() }); if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null } }.onFailure { log.error("[game_localization] 동기화 실패: ${it.message}", it) }
+            captureTableFailure(failedTables, "release_date") {
+                syncWithCursor("release_date", syncId, syncStartedAt) { cursor, lastId ->
+                    val result = igdbClient.fetchReleaseDates(cursor, lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertReleaseDates(result.items.map { it.toEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
+                }
+            }
+            captureTableFailure(failedTables, "platform") {
+                syncWithCursor("platform", syncId, syncStartedAt) { cursor, lastId ->
+                    val result = igdbClient.fetchPlatforms(cursor, lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertPlatforms(result.items.map { it.toEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
+                }
+            }
+            captureTableFailure(failedTables, "involved_company") {
+                syncWithCursor("involved_company", syncId, syncStartedAt) { cursor, lastId ->
+                    val result = igdbClient.fetchInvolvedCompanies(cursor, lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertInvolvedCompanies(result.items.map { it.toEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
+                }
+            }
+            captureTableFailure(failedTables, "company") { syncCompaniesByInvolvedCompanyIds(syncId, syncStartedAt) }
+            captureTableFailure(failedTables, "language_support") {
+                syncWithCursor("language_support", syncId, syncStartedAt) { cursor, lastId ->
+                    val result = igdbClient.fetchLanguageSupports(cursor, lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertLanguageSupports(result.items.map { it.toEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
+                }
+            }
+            captureTableFailure(failedTables, "game_localization") {
+                syncWithCursor("game_localization", syncId, syncStartedAt) { cursor, lastId ->
+                    val result = igdbClient.fetchGameLocalizations(cursor, lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertGameLocalizations(result.items.map { it.toEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
+                }
+            }
 
-            // 4. 게임 ID 필터 기반 미디어 (updated_at 없음 + game FK 있음) — 타입별 예외 격리
-            syncMediaByGameIds("cover",            syncId, syncStartedAt, mediaSync::syncCoverChunk)
-            syncMediaByGameIds("artwork",          syncId, syncStartedAt, mediaSync::syncArtworkChunk)
-            syncMediaByGameIds("screenshot",       syncId, syncStartedAt, mediaSync::syncScreenshotChunk)
-            syncMediaByGameIds("game_video",       syncId, syncStartedAt, mediaSync::syncGameVideoChunk)
-            syncMediaByGameIds("website",          syncId, syncStartedAt, mediaSync::syncWebsiteChunk)
-            syncMediaByGameIds("alternative_name", syncId, syncStartedAt, mediaSync::syncAlternativeNameChunk)
+            // 4. 게임 ID 필터 기반 미디어
+            captureTableFailure(failedTables, "cover") { syncMediaByGameIds("cover", syncId, syncStartedAt, mediaSync::syncCoverChunk) }
+            captureTableFailure(failedTables, "artwork") { syncMediaByGameIds("artwork", syncId, syncStartedAt, mediaSync::syncArtworkChunk) }
+            captureTableFailure(failedTables, "screenshot") { syncMediaByGameIds("screenshot", syncId, syncStartedAt, mediaSync::syncScreenshotChunk) }
+            captureTableFailure(failedTables, "game_video") { syncMediaByGameIds("game_video", syncId, syncStartedAt, mediaSync::syncGameVideoChunk) }
+            captureTableFailure(failedTables, "website") { syncMediaByGameIds("website", syncId, syncStartedAt, mediaSync::syncWebsiteChunk) }
+            captureTableFailure(failedTables, "alternative_name") { syncMediaByGameIds("alternative_name", syncId, syncStartedAt, mediaSync::syncAlternativeNameChunk) }
 
             // 5. 전체 페이지네이션 (updated_at 없음 + game FK 없음)
-            runCatching {
+            captureTableFailure(failedTables, "keyword") {
                 syncPaginated("keyword", syncId, syncStartedAt) { lastId ->
-                    val r = igdbClient.fetchKeywords(lastId)
-                    fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors
-                    repos.jdbc.upsertKeywords(r.items.map { it.toKeywordEntity() })
-                    if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null
+                    val result = igdbClient.fetchKeywords(lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertKeywords(result.items.map { it.toKeywordEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
                 }
-            }.onFailure { log.error("[keyword] 동기화 실패: ${it.message}", it) }
-            runCatching {
+            }
+            captureTableFailure(failedTables, "platform_logo") {
                 syncPaginated("platform_logo", syncId, syncStartedAt) { lastId ->
-                    val r = igdbClient.fetchPlatformLogos(lastId)
-                    fetched += r.fetched; upserted += r.items.size; parseErrors += r.errors
-                    repos.jdbc.upsertPlatformLogos(r.items.map { it.toEntity() })
-                    if (r.fetched == PAGE_SIZE) r.items.lastOrNull()?.id else null
+                    val result = igdbClient.fetchPlatformLogos(lastId)
+                    fetched += result.fetched
+                    upserted += result.items.size
+                    parseErrors += result.errors
+                    repos.jdbc.upsertPlatformLogos(result.items.map { it.toEntity() })
+                    if (result.fetched == PAGE_SIZE) result.items.lastOrNull()?.id else null
                 }
-            }.onFailure { log.error("[platform_logo] 동기화 실패: ${it.message}", it) }
+            }
 
-            repos.jdbc.finishSyncLog(syncId, Instant.now(), "completed")
-        }.onFailure {
-            log.error("IGDB 전체 동기화 실패: ${it.message}", it)
-            repos.jdbc.finishSyncLog(syncId, Instant.now(), "failed")
+            if (failedTables.isNotEmpty()) {
+                throw PartialIngestSyncFailureException(failedTables.toList())
+            }
+
+            val finishedAt = Instant.now()
+            repos.jdbc.finishSyncLog(syncId, finishedAt, "completed")
+            successEvent = IngestSyncSucceededEvent(syncId = syncId, completedAt = finishedAt)
+        } catch (ex: Exception) {
+            when (ex) {
+                is PartialIngestSyncFailureException -> log.warn(ex.message)
+                else -> log.error("IGDB 전체 동기화 실패: ${ex.message}", ex)
+            }
+
+            if (syncLogInserted) {
+                runCatching { repos.jdbc.finishSyncLog(syncId, Instant.now(), "failed") }
+                    .onFailure { finishError ->
+                        log.error("IGDB 실패 상태 기록 실패 (syncId=$syncId): ${finishError.message}", finishError)
+                    }
+            }
         }
+
+        successEvent?.let(eventPublisher::publishEvent)
 
         // [J] Duration.between으로 소요 시간 계산
         log.info("IGDB 전체 동기화 완료 (syncId=$syncId, 소요: ${Duration.between(startTime, Instant.now()).toSeconds()}초)")
+    }
+
+    private fun captureTableFailure(
+        failedTables: MutableList<String>,
+        tableName: String,
+        block: () -> Unit,
+    ) {
+        runCatching(block).onFailure {
+            failedTables += tableName
+            log.error("[$tableName] 동기화 실패: ${it.message}", it)
+        }
     }
 
     // 소량 참조 테이블 — 단일 호출
@@ -146,8 +238,11 @@ class GameReleaseBatchService(
         var iterations = 0
         while (true) {
             if (++iterations > MAX_LOOP_GUARD) {
-                log.error("[$tableName] 최대 반복 횟수($MAX_LOOP_GUARD) 초과 — 루프 강제 종료")
-                break
+                throw LoopGuardExceededException(
+                    tableName = tableName,
+                    guard = MAX_LOOP_GUARD,
+                    scope = "커서 기반 동기화",
+                )
             }
             lastId = stats.fetchAndSave(cursor, lastId) ?: break
         }
@@ -164,8 +259,11 @@ class GameReleaseBatchService(
         var iterations = 0
         while (true) {
             if (++iterations > MAX_LOOP_GUARD) {
-                log.error("[$tableName] 최대 반복 횟수($MAX_LOOP_GUARD) 초과 — 루프 강제 종료")
-                break
+                throw LoopGuardExceededException(
+                    tableName = tableName,
+                    guard = MAX_LOOP_GUARD,
+                    scope = "전체 페이지네이션",
+                )
             }
             lastId = stats.fetchAndSave(lastId) ?: break
         }
@@ -182,26 +280,27 @@ class GameReleaseBatchService(
         val mediaCursor = repos.syncCursor.findById(tableName).map { it.lastSyncedAt }.orElse(0L)
         log.info("[$tableName] 게임 ID 필터 동기화 시작 (mediaCursor=$mediaCursor)")
         val stats = TableSyncStats(syncId, tableName)
-        runCatching {
-            var lastGameId = 0L
-            var iterations = 0
-            do {
-                if (++iterations > MAX_LOOP_GUARD) {
-                    log.error("[$tableName] 게임 ID 순회 최대 반복 횟수($MAX_LOOP_GUARD) 초과 — 루프 강제 종료")
-                    break
-                }
-                val slice = if (mediaCursor > 0L) {
-                    repos.game.findAllIdsUpdatedAfter(lastGameId, mediaCursor, PageRequest.of(0, MEDIA_CHUNK_SIZE))
-                } else {
-                    repos.game.findAllIdsAfter(lastGameId, PageRequest.of(0, MEDIA_CHUNK_SIZE))
-                }
-                slice.content.takeIf { it.isNotEmpty() }?.let {
-                    syncChunk(it, stats)
-                    lastGameId = it.last()
-                }
-            } while (slice.hasNext())
-            updateCursor(tableName, syncStartedAt)
-        }.onFailure { log.error("[$tableName] 동기화 실패: ${it.message}", it) }
+        var lastGameId = 0L
+        var iterations = 0
+        do {
+            if (++iterations > MAX_LOOP_GUARD) {
+                throw LoopGuardExceededException(
+                    tableName = tableName,
+                    guard = MAX_LOOP_GUARD,
+                    scope = "게임 ID 순회",
+                )
+            }
+            val slice = if (mediaCursor > 0L) {
+                repos.game.findAllIdsUpdatedAfter(lastGameId, mediaCursor, PageRequest.of(0, MEDIA_CHUNK_SIZE))
+            } else {
+                repos.game.findAllIdsAfter(lastGameId, PageRequest.of(0, MEDIA_CHUNK_SIZE))
+            }
+            slice.content.takeIf { it.isNotEmpty() }?.let {
+                syncChunk(it, stats)
+                lastGameId = it.last()
+            }
+        } while (slice.hasNext())
+        updateCursor(tableName, syncStartedAt)
         stats.finishedAt = Instant.now()
         saveStats(stats)
     }
@@ -217,8 +316,11 @@ class GameReleaseBatchService(
             var iterations = 0
             while (true) {
                 if (++iterations > MAX_LOOP_GUARD) {
-                    log.error("[company] 최대 반복 횟수($MAX_LOOP_GUARD) 초과 — 루프 강제 종료")
-                    break
+                    throw LoopGuardExceededException(
+                        tableName = "company",
+                        guard = MAX_LOOP_GUARD,
+                        scope = "company keyset 순회",
+                    )
                 }
                 val result = igdbClient.fetchCompaniesByIds(chunk, cursor, lastId)
                 stats.fetched += result.fetched
